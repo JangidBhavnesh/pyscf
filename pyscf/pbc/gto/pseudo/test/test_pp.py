@@ -90,7 +90,7 @@ def get_pp_nl(cell, kpt=np.zeros(3)):
         if symb not in cell._pseudo:
             continue
         pp = cell._pseudo[symb]
-        for l, proj in enumerate(pp[5:]):
+        for l, proj in enumerate(pp[5:pp[4]+5]):
             rl, nl, hl = proj
             if nl > 0:
                 hl = np.asarray(hl)
