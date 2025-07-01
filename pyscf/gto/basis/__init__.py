@@ -432,6 +432,7 @@ PP_ALIAS = {
     'gthpbesol'  : 'gth-pbesol.dat' ,
     'gthhf'      : 'gth-hf.dat'     ,
     'gthhfrev'   : 'gth-hf-rev.dat' ,
+    'gthsocpade' : 'gth-soc-pade.dat',
 }
 
 def _is_pople_basis(basis):
