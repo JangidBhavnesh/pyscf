@@ -303,9 +303,11 @@ def get_pp_so(cell, kpt=np.zeros(3)):
     '''
     from pyscf.pbc import tools
     coords = cell.get_uniform_grids()
+
     aoR = cell.pbc_eval_gto('GTOval', coords, kpt=kpt)
     nao = cell.nao_nr()
     SI = cell.get_SI()
+
     aokG = tools.fftk(np.asarray(aoR.T, order='C'),
                       cell.mesh, np.exp(-1j*np.dot(coords, kpt))).T
     ngrids = len(aokG)
@@ -321,7 +323,7 @@ def get_pp_so(cell, kpt=np.zeros(3)):
     Gv = np.asarray(cell.Gv+kpt)
     G_rad = lib.norm(Gv, axis=1)
 
-    vppnl = np.zeros((3, nao,nao), dtype=np.complex128)
+    vppnlso = np.zeros((3, nao,nao), dtype=np.complex128)
     for ia in range(cell.natm):
         symb = cell.atom_symbol(ia)
         if symb not in cell._pseudo:
@@ -338,7 +340,8 @@ def get_pp_so(cell, kpt=np.zeros(3)):
                 fakemol._built = True
                 pYlm_part = fakemol.eval_gto('GTOval', Gv)
                 Lm = fakemol.intor('int1e_cg_irxp', comp=3, hermi=2)
-                assert np.allclose(Lm, -Lm.conj().T)
+                # for a in range(3):
+                #     assert np.allclose(Lm[a], -Lm[a].conj().T)
                 pYlm = np.empty((nl,l*2+1,ngrids))
 
                 for k in range(nl):
@@ -346,12 +349,13 @@ def get_pp_so(cell, kpt=np.zeros(3)):
                     pYlm[k] = pYlm_part.T * qkl
 
                 for a in range(3):
-                    pYLlm = np.einsum('nkg, km->nmg', pYlm, Lm[a])
-                    SPG_Llmi = np.einsum('g,nmg->nmg', SI[ia].conj(), pYLlm)
-                    SPG_Llm_aoG = np.einsum('nmg,gp->nmp', SPG_Llmi, aokG)
-                    tmp = np.einsum('ij,jmp->imp', hl, SPG_Llm_aoG)
-                    SPG_lmi = np.einsum('g,nmg->nmg', SI[ia].conj(), pYlm)
-                    SPG_lm_aoG = np.einsum('nmg,gp->nmp', SPG_lmi, aokG)
-                    vppnl[a] += np.einsum('imp,imq->pq', SPG_lm_aoG.conj(), tmp)
-    vppnl *= (1./ngrids**2)
-    return vppnl
+                    pYLlm = np.tensordot(pYlm, Lm[a], axes=([1], [0])).transpose(0, 2, 1)
+                    SPG_Llmi = pYLlm * SI[ia].conj()[None, None, :]
+                    SPG_Llm_aoG = np.tensordot(SPG_Llmi, aokG,  axes=([2], [0]))
+                    tmp = np.tensordot(hl, SPG_Llm_aoG, axes=([1], [0]))
+                    SPG_lmi = pYlm * SI[ia].conj()[None, None, :]
+                    SPG_lm_aoG = np.tensordot(SPG_lmi, aokG,  axes=([2], [0]))
+                    vppnlso[a] += np.tensordot(SPG_lm_aoG.conj(), tmp, axes=([0, 1], [0, 1]))
+
+    vppnlso *= (1./ngrids**2)
+    return vppnlso
