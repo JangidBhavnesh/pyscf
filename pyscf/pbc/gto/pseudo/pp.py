@@ -225,7 +225,6 @@ def cart2polar(rvec):
     phi = np.arctan2(y,x)
     return r, theta, phi
 
-
 def get_pp(cell, kpt=np.zeros(3)):
     '''Get the periodic pseudopotential nuc-el AO matrix
     '''
@@ -291,9 +290,68 @@ def get_pp(cell, kpt=np.zeros(3)):
     else:
         return vpploc + vppnl
 
-
 def get_jvloc_G0(cell, kpt=np.zeros(3)):
     '''Get the (separately divergent) Hartree + Vloc G=0 contribution.
     '''
     ovlp = cell.pbc_intor('int1e_ovlp', hermi=1, kpts=kpt)
     return 1./cell.vol * np.sum(get_alphas(cell)) * ovlp
+
+def get_pp_so(cell, kpt=np.zeros(3)):
+    '''
+    Get the SOC potental: <\phi_\mu|V_{SOC}L|\phi_\nu> matrix for the periodic
+    system cell.
+    '''
+    from pyscf.pbc import tools
+    coords = cell.get_uniform_grids()
+    aoR = cell.pbc_eval_gto('GTOval', coords, kpt=kpt)
+    nao = cell.nao_nr()
+    SI = cell.get_SI()
+    aokG = tools.fftk(np.asarray(aoR.T, order='C'),
+                      cell.mesh, np.exp(-1j*np.dot(coords, kpt))).T
+    ngrids = len(aokG)
+    fakemol = mole.Mole()
+    fakemol._atm = np.zeros((1,mole.ATM_SLOTS), dtype=np.int32)
+    fakemol._bas = np.zeros((1,mole.BAS_SLOTS), dtype=np.int32)
+    ptr = mole.PTR_ENV_START
+    fakemol._env = np.zeros(ptr+10)
+    fakemol._bas[0,mole.NPRIM_OF ] = 1
+    fakemol._bas[0,mole.NCTR_OF  ] = 1
+    fakemol._bas[0,mole.PTR_EXP  ] = ptr+3
+    fakemol._bas[0,mole.PTR_COEFF] = ptr+4
+    Gv = np.asarray(cell.Gv+kpt)
+    G_rad = lib.norm(Gv, axis=1)
+
+    vppnl = np.zeros((3, nao,nao), dtype=np.complex128)
+    for ia in range(cell.natm):
+        symb = cell.atom_symbol(ia)
+        if symb not in cell._pseudo:
+            continue
+        pp = cell._pseudo[symb]
+        for l, proj in enumerate(pp[pp[4]+6:]):
+            l += 1
+            rl, nl, hl = proj
+            if nl > 0:
+                hl = np.asarray(hl)
+                fakemol._bas[0,mole.ANG_OF] = l
+                fakemol._env[ptr+3] = .5*rl**2
+                fakemol._env[ptr+4] = rl**(l+1.5)*np.pi**1.25
+                fakemol._built = True
+                pYlm_part = fakemol.eval_gto('GTOval', Gv)
+                Lm = fakemol.intor('int1e_cg_irxp', comp=3, hermi=2)
+                assert np.allclose(Lm, -Lm.conj().T)
+                pYlm = np.empty((nl,l*2+1,ngrids))
+
+                for k in range(nl):
+                    qkl = _qli(G_rad*rl, l, k)
+                    pYlm[k] = pYlm_part.T * qkl
+
+                for a in range(3):
+                    pYLlm = np.einsum('nkg, km->nmg', pYlm, Lm[a])
+                    SPG_Llmi = np.einsum('g,nmg->nmg', SI[ia].conj(), pYLlm)
+                    SPG_Llm_aoG = np.einsum('nmg,gp->nmp', SPG_Llmi, aokG)
+                    tmp = np.einsum('ij,jmp->imp', hl, SPG_Llm_aoG)
+                    SPG_lmi = np.einsum('g,nmg->nmg', SI[ia].conj(), pYlm)
+                    SPG_lm_aoG = np.einsum('nmg,gp->nmp', SPG_lmi, aokG)
+                    vppnl[a] += np.einsum('imp,imq->pq', SPG_lm_aoG.conj(), tmp)
+    vppnl *= (1./ngrids**2)
+    return vppnl
