@@ -95,7 +95,7 @@ def _parse(plines):
             for h in plines.pop(0).split():
                 hproj_p_ij.append(float(h))
 
-        if l > 0:
+        if SOCPP and l > 0:
             kproj_p_ij = []
             for i in range(nproj[-1]):
                 for h in plines.pop(0).split():

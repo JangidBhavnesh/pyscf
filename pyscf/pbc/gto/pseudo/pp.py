@@ -228,6 +228,7 @@ def cart2polar(rvec):
 def get_pp(cell, kpt=np.zeros(3)):
     '''Get the periodic pseudopotential nuc-el AO matrix
     '''
+    print("Getting PP matrix...")
     from pyscf.pbc import tools
     coords = cell.get_uniform_grids()
     aoR = cell.pbc_eval_gto('GTOval', coords, kpt=kpt)
@@ -284,7 +285,7 @@ def get_pp(cell, kpt=np.zeros(3)):
                 tmp = np.einsum('ij,jmp->imp', hl, SPG_lm_aoG)
                 vppnl += np.einsum('imp,imq->pq', SPG_lm_aoG.conj(), tmp)
     vppnl *= (1./ngrids**2)
-
+    print(vppnl)
     if aoR.dtype == np.double:
         return vpploc.real + vppnl.real
     else:
@@ -339,23 +340,52 @@ def get_pp_so(cell, kpt=np.zeros(3)):
                 fakemol._env[ptr+4] = rl**(l+1.5)*np.pi**1.25
                 fakemol._built = True
                 pYlm_part = fakemol.eval_gto('GTOval', Gv)
-                Lm = fakemol.intor('int1e_cg_irxp', comp=3, hermi=2)
-                # for a in range(3):
-                #     assert np.allclose(Lm[a], -Lm[a].conj().T)
+                Lm = fakemol.intor('int1e_cg_irxp', comp=3)
                 pYlm = np.empty((nl,l*2+1,ngrids))
 
                 for k in range(nl):
                     qkl = _qli(G_rad*rl, l, k)
                     pYlm[k] = pYlm_part.T * qkl
-
+                #  pYLlm = np.einsum('nkg, km->nmg', pYlm, Lm[a])
+                # SPG_Llmi = np.einsum('g,nmg->nmg', SI[ia].conj(), pYLlm)
+                # SPG_Llm_aoG = np.einsum('nmg,gp->nmp', SPG_Llmi, aokG)
+                # tmp = np.einsum('ij,jmp->imp', hl, SPG_Llm_aoG)
+                # SPG_lmi = np.einsum('g,nmg->nmg', SI[ia].conj(), pYlm)
+                # SPG_lm_aoG = np.einsum('nmg,gp->nmp', SPG_lmi, aokG)
+                # vppnl[a] += np.einsum('imp,imq->pq', SPG_lm_aoG.conj(), tmp)
+                
                 for a in range(3):
-                    pYLlm = np.tensordot(pYlm, Lm[a], axes=([1], [0])).transpose(0, 2, 1)
+                    pYLlm = np.tensordot(pYlm, Lm[a], axes=([1], [0])).conj().transpose(0, 2, 1)
                     SPG_Llmi = pYLlm * SI[ia].conj()[None, None, :]
                     SPG_Llm_aoG = np.tensordot(SPG_Llmi, aokG,  axes=([2], [0]))
                     tmp = np.tensordot(hl, SPG_Llm_aoG, axes=([1], [0]))
                     SPG_lmi = pYlm * SI[ia].conj()[None, None, :]
                     SPG_lm_aoG = np.tensordot(SPG_lmi, aokG,  axes=([2], [0]))
                     vppnlso[a] += np.tensordot(SPG_lm_aoG.conj(), tmp, axes=([0, 1], [0, 1]))
-
+            #vppnlso *= (-1**l)*l #/(2*l+1)
     vppnlso *= (1./ngrids**2)
     return vppnlso
+
+from pyscf.symm import sph
+def angular_moment_matrix(l):
+    '''Matrix of angular moment operator l*1j on the real spherical harmonic
+    basis'''
+    lz = np.diag(np.arange(-l, l+1, dtype=np.complex128))
+    lx = np.zeros_like(lz)
+    ly = np.zeros_like(lz)
+    for mi in range(-l, l+1):
+        mj = mi + 1
+        if mj <= l:
+            lx[l+mi,l+mj] = .5  * ((l+mj)*(l-mj+1))**.5
+            ly[l+mi,l+mj] = .5j * ((l+mj)*(l-mj+1))**.5
+
+        mj = mi - 1
+        if mj >= -l:
+            lx[l+mi,l+mj] = .5  * ((l-mj)*(l+mj+1))**.5
+            ly[l+mi,l+mj] =-.5j * ((l-mj)*(l+mj+1))**.5
+
+    u = sph.sph_pure2real(l)
+    lx = u.conj().T.dot(lx).dot(u)
+    ly = u.conj().T.dot(ly).dot(u)
+    lz = u.conj().T.dot(lz).dot(u)
+    return np.array((lx, ly, lz))

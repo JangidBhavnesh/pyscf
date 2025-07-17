@@ -126,7 +126,6 @@ def get_pp_loc_part2(cell, kpts=None):
         vpploc = vpploc[0]
     return vpploc
 
-
 def get_pp_loc_part2_gamma(cell):
     from pyscf.pbc.df import incore
     from pyscf.pbc.gto import build_neighbor_list_for_shlpairs, free_neighbor_list
@@ -164,7 +163,6 @@ def get_pp_loc_part2_gamma(cell):
 
     vpploc = lib.unpack_tril(buf)
     return vpploc
-
 
 # TODO add k-point sampling
 def vpploc_part2_nuc_grad(cell, dm, kpts=None):
@@ -225,7 +223,6 @@ def _prepare_hl_data(fakecell, hl_blocks):
             offset[i] += nd
     hl_data = numpy.asarray(hl_data, order='C', dtype=numpy.double)
     return hl_table, hl_data
-
 
 # TODO add k-point sampling
 def _contract_ppnl(cell, fakecell, hl_blocks, ppnl_half, comp=1, kpts=None):
@@ -293,7 +290,6 @@ def _contract_ppnl(cell, fakecell, hl_blocks, ppnl_half, comp=1, kpts=None):
     if kpts is None or numpy.shape(kpts) == (3,):
         ppnl = ppnl[0]
     return ppnl
-
 
 # TODO add k-point sampling
 def _contract_ppnl_nuc_grad(cell, fakecell, dms, hl_blocks, ppnl_half, ppnl_half_ip2,
@@ -403,7 +399,6 @@ def _contract_ppnl_nuc_grad(cell, fakecell, dms, hl_blocks, ppnl_half, ppnl_half
         grad_tot = grad_tot.real
     return grad_tot
 
-
 def get_pp_nl(cell, kpts=None):
     if kpts is None:
         kpts_lst = numpy.zeros((1,3))
@@ -443,7 +438,6 @@ def get_pp_nl(cell, kpts=None):
         ppnl = ppnl[0]
     return ppnl
 
-
 def vppnl_nuc_grad(cell, dm, kpts=None):
     '''
     Nuclear gradients of the non-local part of the GTH pseudo potential,
@@ -467,7 +461,6 @@ def vppnl_nuc_grad(cell, dm, kpts=None):
                                    ppnl_half, ppnl_half_ip2, kpts=kpts)
     grad *= -2
     return grad
-
 
 def fake_cell_vloc(cell, cn=0, atm_id=None):
     '''Generate fake cell for V_{loc}.
@@ -523,7 +516,6 @@ def fake_cell_vloc(cell, cn=0, atm_id=None):
     fakecell._env = numpy.asarray(numpy.hstack(fake_env), dtype=numpy.double)
     return fakecell
 
-
 # sqrt(Gamma(l+1.5)/Gamma(l+2i+1.5))
 _PLI_FAC = 1/numpy.sqrt(numpy.array((
     (1, 3.75 , 59.0625  ),  # l = 0,
@@ -561,6 +553,52 @@ def fake_cell_vnl(cell):
                     fake_env.append([alpha, norm])
                     fake_bas.append([ia, l, 1, 1, 0, ptr, ptr+1, 0])
 
+#
+# Function p_i^l (PRB, 58, 3641 Eq 3) is (r^{2(i-1)})^2 square normalized to 1.
+# But here the fake basis is square normalized to 1.  A factor ~ p_i^l / p_1^l
+# is attached to h^l_ij (for i>1,j>1) so that (factor * fake-basis * r^{2(i-1)})
+# is normalized to 1.  The factor is
+#       r_l^{l+(4-1)/2} sqrt(Gamma(l+(4-1)/2))      sqrt(Gamma(l+3/2))
+#     ------------------------------------------ = ----------------------------------
+#      r_l^{l+(4i-1)/2} sqrt(Gamma(l+(4i-1)/2))     sqrt(Gamma(l+2i-1/2)) r_l^{2i-2}
+#
+                    fac = numpy.array([_PLI_FAC[l,i]/rl**(i*2) for i in range(nl)])
+                    hl = numpy.einsum('i,ij,j->ij', fac, numpy.asarray(hl), fac)
+                    hl_blocks.append(hl)
+                    ptr += 2
+
+    fakecell = cell.copy(deep=False)
+    fakecell._atm = numpy.asarray(fake_atm, dtype=numpy.int32)
+    fakecell._bas = numpy.asarray(fake_bas, dtype=numpy.int32).reshape(-1, gto.BAS_SLOTS)
+    fakecell._env = numpy.asarray(numpy.hstack(fake_env), dtype=numpy.double)
+    return fakecell, hl_blocks
+
+def fake_cell_vnl_so(cell):
+    '''Generate fake cell for V_{nl}.
+
+    gaussian function p_i^l Y_{lm}
+    '''
+    fake_env = [cell.atom_coords().ravel()]
+    fake_atm = cell._atm.copy()
+    fake_atm[:,gto.PTR_COORD] = numpy.arange(0, cell.natm*3, 3)
+    ptr = cell.natm * 3
+    fake_bas = []
+    hl_blocks = []
+    for ia in range(cell.natm):
+        if cell.atom_charge(ia) == 0:  # pass ghost atoms
+            continue
+
+        symb = cell.atom_symbol(ia)
+        if symb in cell._pseudo:
+            pp = cell._pseudo[symb]
+            # nproj_types = pp[4]
+            for l, (rl, nl, hl) in enumerate(pp[pp[4]+6:]):
+                l +=1
+                if nl > 0:
+                    alpha = .5 / rl**2
+                    norm = gto.gto_norm(l, alpha)
+                    fake_env.append([alpha, norm])
+                    fake_bas.append([ia, l, 1, 1, 0, ptr, ptr+1, 0])
 #
 # Function p_i^l (PRB, 58, 3641 Eq 3) is (r^{2(i-1)})^2 square normalized to 1.
 # But here the fake basis is square normalized to 1.  A factor ~ p_i^l / p_1^l
@@ -634,3 +672,108 @@ def _int_vnl(cell, fakecell, hl_blocks, kpts, intors=None, comp=1):
            int_ket(fakecell._bas[hl_dims>1], intors[1]),
            int_ket(fakecell._bas[hl_dims>2], intors[2]))
     return out
+
+    from pyscf.pbc.gto import NeighborListOpt
+    if kpts is None:
+        kpts_lst = numpy.zeros((1,3))
+    else:
+        kpts_lst = numpy.reshape(kpts, (-1,3))
+
+    hl_table, hl_data = _prepare_hl_data(fakecell, hl_blocks)
+
+    opt = NeighborListOpt(fakecell)
+    opt.build(fakecell, cell)
+
+    shls_slice = (0, cell.nbas, 0, cell.nbas)
+    key = 'cart' if cell.cart else 'sph'
+    ao_loc = gto.moleintor.make_loc(cell._bas, key)
+
+    ppnl = []
+    nao = cell.nao_nr()
+    nao_pair = nao * (nao+1) // 2
+    for k, kpt in enumerate(kpts_lst):
+        ppnl_half0 = ppnl_half1 = ppnl_half2 = None
+        if len(ppnl_half[0]) > 0:
+            ppnl_half0 = ppnl_half[0][k]
+        if len(ppnl_half[1]) > 0:
+            ppnl_half1 = ppnl_half[1][k]
+        if len(ppnl_half[2]) > 0:
+            ppnl_half2 = ppnl_half[2][k]
+
+        if gamma_point(kpt):
+            if ppnl_half0 is not None:
+                ppnl_half0 = ppnl_half0.real
+            if ppnl_half1 is not None:
+                ppnl_half1 = ppnl_half1.real
+            if ppnl_half2 is not None:
+                ppnl_half2 = ppnl_half2.real
+            buf = numpy.empty([nao_pair], order='C', dtype=numpy.double)
+            fill = getattr(libpbc, 'ppnl_fill_gs2')
+        else:
+            buf = numpy.empty([nao_pair], order='C', dtype=numpy.complex128)
+            raise NotImplementedError
+
+        ppnl_half0 = numpy.asarray(ppnl_half0, order='C')
+        ppnl_half1 = numpy.asarray(ppnl_half1, order='C')
+        ppnl_half2 = numpy.asarray(ppnl_half2, order='C')
+
+        drv = getattr(libpbc, "contract_ppnl", None)
+        try:
+            drv(fill, buf.ctypes.data_as(ctypes.c_void_p),
+                ppnl_half0.ctypes.data_as(ctypes.c_void_p),
+                ppnl_half1.ctypes.data_as(ctypes.c_void_p),
+                ppnl_half2.ctypes.data_as(ctypes.c_void_p),
+                ctypes.c_int(comp), (ctypes.c_int*4)(*shls_slice),
+                ao_loc.ctypes.data_as(ctypes.c_void_p),
+                hl_table.ctypes.data_as(ctypes.c_void_p),
+                hl_data.ctypes.data_as(ctypes.c_void_p),
+                ctypes.c_int(len(hl_blocks)), opt._this)
+        except Exception as e:
+            raise RuntimeError(f"Failed to compute non-local pseudo-potential.\n{e}")
+
+        ppnl_k = lib.unpack_tril(buf)
+        ppnl.append(ppnl_k)
+
+    if kpts is None or numpy.shape(kpts) == (3,):
+        ppnl = ppnl[0]
+    return ppnl
+
+def get_gth_pp_so(cell, kpts=None):
+
+    if kpts is None:
+        kpts_lst = numpy.zeros((1,3))
+    else:
+        kpts_lst = numpy.reshape(kpts, (-1,3))
+
+    nkpts = len(kpts_lst)
+    # assert nkpts < 2, "Not implemented yet."
+
+    fakecell, hl_blocks = fake_cell_vnl_so(cell)
+    
+    ppnl_half = _int_vnl(cell, fakecell, hl_blocks, kpts_lst)
+    nao = cell.nao_nr()
+
+    buf = numpy.empty((3*9*nao), dtype=numpy.complex128)
+
+    ppnl = numpy.zeros((nkpts,3, nao,nao), dtype=numpy.complex128)
+    for k, kpts in enumerate(kpts_lst):
+        offset = [0] * 3
+        for ib, hl in enumerate(hl_blocks):
+            l = fakecell.bas_angular(ib)
+            sh0 = ib
+            sh1 = ib+1
+            ss  = (sh0, sh1, sh0, sh1)
+            Lx = fakecell.intor('int1e_cg_irxp', shls_slice=ss)
+            nd = 2 * l + 1
+            hl_dim = hl.shape[0]
+            ilp = numpy.ndarray((hl_dim,nd,nao), dtype=numpy.complex128, buffer=buf)
+            for i in range(hl_dim):
+                p0 = offset[i]
+                ilp[i] = ppnl_half[i][k][p0:p0+nd]
+                offset[i] = p0 + nd
+            ppnl[k] += numpy.einsum('inp,ij,jmq, smn->spq', ilp.conj(), hl, ilp, Lx)
+
+    if kpts is None or numpy.shape(kpts) == (3,):
+        ppnl = ppnl[0]
+
+    return ppnl
