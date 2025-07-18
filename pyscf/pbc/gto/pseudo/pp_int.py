@@ -554,8 +554,7 @@ def fake_cell_vnl(cell):
         symb = cell.atom_symbol(ia)
         if symb in cell._pseudo:
             pp = cell._pseudo[symb]
-            # nproj_types = pp[4]
-            for l, (rl, nl, hl) in enumerate(pp[5:]):
+            for l, (rl, nl, hl) in enumerate(pp[5:pp[4]+5]):
                 if nl > 0:
                     alpha = .5 / rl**2
                     norm = gto.gto_norm(l, alpha)

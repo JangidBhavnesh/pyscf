@@ -122,7 +122,7 @@ def get_gth_projG(cell, Gvs):
         # nproj_types = pp[4]
         h_ia = []
         proj_ia = []
-        for l,proj in enumerate(pp[5:]):
+        for l,proj in enumerate(pp[5:pp[4]+5]):
             rl, nl, hl = proj
             h_ia.append( np.array(hl) )
             proj_ia_l = []
@@ -266,7 +266,7 @@ def get_pp(cell, kpt=np.zeros(3)):
         if symb not in cell._pseudo:
             continue
         pp = cell._pseudo[symb]
-        for l, proj in enumerate(pp[5:]):
+        for l, proj in enumerate(pp[5:pp[4]+5]):
             rl, nl, hl = proj
             if nl > 0:
                 hl = np.asarray(hl)

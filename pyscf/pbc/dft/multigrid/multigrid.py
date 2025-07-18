@@ -433,7 +433,7 @@ def get_pp(mydf, kpts=None, max_memory=4000):
                 continue
             pp = cell._pseudo[symb]
             p1 = 0
-            for l, proj in enumerate(pp[5:]):
+            for l, proj in enumerate(pp[5:pp[4]+5]):
                 rl, nl, hl = proj
                 if nl > 0:
                     p1 = p1+nl*(l*2+1)
@@ -456,7 +456,7 @@ def get_pp(mydf, kpts=None, max_memory=4000):
                     continue
                 pp = cell._pseudo[symb]
                 p1 = 0
-                for l, proj in enumerate(pp[5:]):
+                for l, proj in enumerate(pp[5:pp[4]+5]):
                     rl, nl, hl = proj
                     if nl > 0:
                         fakemol._bas[0,gto.ANG_OF] = l
@@ -485,7 +485,7 @@ def get_pp(mydf, kpts=None, max_memory=4000):
                 continue
             pp = cell._pseudo[symb]
             p1 = 0
-            for l, proj in enumerate(pp[5:]):
+            for l, proj in enumerate(pp[5:pp[4]+5]):
                 rl, nl, hl = proj
                 if nl > 0:
                     p0, p1 = p1, p1+nl*(l*2+1)

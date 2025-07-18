@@ -113,7 +113,7 @@ def get_hcore(cell, kpts):
                 if symb not in cell._pseudo:
                     continue
                 pp = cell._pseudo[symb]
-                for l, proj in enumerate(pp[5:]):
+                for l, proj in enumerate(pp[5:pp[4]+5]):
                     rl, nl, hl = proj
                     if nl >0:
                         hl = np.asarray(hl)
@@ -178,7 +178,7 @@ def hcore_generator(mf, cell=None, kpts=None):
             G_rad = lib.norm(Gk, axis=1)
             if symb not in cell._pseudo: continue
             pp = cell._pseudo[symb]
-            for l, proj in enumerate(pp[5:]):
+            for l, proj in enumerate(pp[5:pp[4]+5]):
                 rl, nl, hl = proj
                 if nl >0:
                     hl = np.asarray(hl)
