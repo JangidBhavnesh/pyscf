@@ -69,11 +69,16 @@ def _parse(plines):
     rloc = float(rnc_ppl[0])
     nexp = int(rnc_ppl[1])
     cexp = [ float(c) for c in rnc_ppl[2:] ]
-    nproj_types = int(plines.pop(0))
+    aline = plines.pop(0)
+    SOCPP = "SOC" in aline
+    nproj_types = int(re.search(r'\d+', aline).group() if SOCPP else int(aline))
+    del aline
     r = []
     nproj = []
     hproj = []
+    if SOCPP: kproj = []
     for p in range(nproj_types):
+        l = len(r)
         rnh_ppnl = plines.pop(0).split()
         r.append(float(rnh_ppnl[0]))
         nproj.append(int(rnh_ppnl[1]))
@@ -83,6 +88,17 @@ def _parse(plines):
         for i in range(1,nproj[-1]):
             for h in plines.pop(0).split():
                 hproj_p_ij.append(float(h))
+        if l > 0:
+            kproj_p_ij = []
+            for i in range(nproj[-1]):
+                for h in plines.pop(0).split():
+                    kproj_p_ij.append(float(h))
+
+            kproj_p = np.zeros((nproj[-1],nproj[-1]))
+            kproj_p[np.triu_indices(nproj[-1])] = list(kproj_p_ij)
+            kproj_p_symm = kproj_p + kproj_p.T - np.diag(kproj_p.diagonal())
+            kproj.append(kproj_p_symm.tolist())
+
         hproj_p = np.zeros((nproj[-1],nproj[-1]))
         hproj_p[np.triu_indices(nproj[-1])] = list(hproj_p_ij)
         hproj_p_symm = hproj_p + hproj_p.T - np.diag(hproj_p.diagonal())
@@ -93,6 +109,10 @@ def _parse(plines):
                      nproj_types]
     for ri,ni,hi in zip(r,nproj,hproj):
         pseudo_params.append([ri, ni, hi])
+    if SOCPP:
+        pseudo_params.append(nproj_types-1)  # Number of SOC projectors
+        for ri,ni,ki in zip(r[1:],nproj[1:],kproj):
+            pseudo_params.append([ri, ni, ki])
     return pseudo_params
 
 def search_seg(pseudofile, symb, suffix=None):
@@ -146,4 +166,15 @@ if __name__ == '__main__':
         2
          0.30232223    1     9.66551228
          0.28637912    0
+    """))
+
+    # Along with the scalar relativistic PP terms, the SOC terms are also parsed.
+    print(parse("""
+    C GTH-BLYP-q4 GTH-BLYP
+        2    2
+        0.33806609    2    -9.13626871     1.42925956
+        2  SOC
+        0.30232223    1     9.66551228
+        0.28637912    1     0.00000000
+                            0.00218693
     """))
