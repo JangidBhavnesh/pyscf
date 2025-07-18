@@ -635,3 +635,76 @@ def _int_vnl(cell, fakecell, hl_blocks, kpts, intors=None, comp=1):
            int_ket(fakecell._bas[hl_dims>1], intors[1]),
            int_ket(fakecell._bas[hl_dims>2], intors[2]))
     return out
+
+def fake_cell_vnl_so(cell):
+    '''
+    Generate fake cell for V_{nl}.
+    gaussian function p_i^l Y_{lm}
+    '''
+    fake_env = [cell.atom_coords().ravel()]
+    fake_atm = cell._atm.copy()
+    fake_atm[:,gto.PTR_COORD] = numpy.arange(0, cell.natm*3, 3)
+    ptr = cell.natm * 3
+    fake_bas = []
+    kl_blocks = []
+    for ia in range(cell.natm):
+        if cell.atom_charge(ia) == 0:  # pass ghost atoms
+            continue
+        symb = cell.atom_symbol(ia)
+        if symb in cell._pseudo:
+            pp = cell._pseudo[symb]
+            for l, (rl, nl, hl) in enumerate(pp[pp[4]+6:]):
+                l +=1 # spin-orbit part starts from l=1
+                if nl > 0:
+                    alpha = .5 / rl**2
+                    norm = gto.gto_norm(l, alpha)
+                    fake_env.append([alpha, norm])
+                    fake_bas.append([ia, l, 1, 1, 0, ptr, ptr+1, 0])
+                    # See above for the explanation of the normalization factor
+                    fac = numpy.array([_PLI_FAC[l,i]/rl**(i*2) for i in range(nl)])
+                    hl = numpy.einsum('i,ij,j->ij', fac, numpy.asarray(hl), fac)
+                    kl_blocks.append(hl)
+                    ptr += 2
+
+    fakecell = cell.copy(deep=False)
+    fakecell._atm = numpy.asarray(fake_atm, dtype=numpy.int32)
+    fakecell._bas = numpy.asarray(fake_bas, dtype=numpy.int32).reshape(-1, gto.BAS_SLOTS)
+    fakecell._env = numpy.asarray(numpy.hstack(fake_env), dtype=numpy.double)
+    return fakecell, kl_blocks
+
+def get_gth_pp_so(cell, kpts=None):
+    if kpts is None:
+        kpts_lst = numpy.zeros((1,3))
+    else:
+        kpts_lst = numpy.reshape(kpts, (-1,3))
+
+    nkpts = len(kpts_lst)
+    # assert nkpts < 2, "Not implemented yet." # TODO add k-point sampling
+    fakecell, kl_blocks = fake_cell_vnl_so(cell)
+    ppnl_half = _int_vnl(cell, fakecell, kl_blocks, kpts_lst)
+    nao = cell.nao_nr()
+
+    buf = numpy.empty((3*9*nao), dtype=numpy.complex128)
+
+    ppnl = numpy.zeros((nkpts,3, nao,nao), dtype=numpy.complex128)
+    for k, kpts in enumerate(kpts_lst):
+        offset = [0] * 3
+        for ib, kl in enumerate(kl_blocks):
+            l = fakecell.bas_angular(ib)
+            sh0 = ib
+            sh1 = ib+1
+            ss  = (sh0, sh1, sh0, sh1)
+            Lx = fakecell.intor('int1e_cg_irxp', shls_slice=ss)
+            nd = 2 * l + 1
+            kl_dim = kl.shape[0]
+            ilp = numpy.ndarray((kl_dim,nd,nao), dtype=numpy.complex128, buffer=buf)
+            for i in range(kl_dim):
+                p0 = offset[i]
+                ilp[i] = ppnl_half[i][k][p0:p0+nd]
+                offset[i] = p0 + nd
+            ppnl[k] += numpy.einsum('inp,ij,jmq, smn->spq', ilp.conj(), kl, ilp, Lx)
+
+    if kpts is None or numpy.shape(kpts) == (3,):
+        ppnl = ppnl[0]
+
+    return ppnl

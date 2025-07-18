@@ -78,3 +78,41 @@ def get_gth_pp(mol):
             offset[i] = p0 + nd
         vpploc += np.einsum('ilp,ij,jlq->pq', ilp.conj(), hl, ilp)
     return vpploc
+
+def get_gth_pp_so(mol):
+    from pyscf.pbc.gto.pseudo import pp_int
+    vpploc = np.zeros((3, mol.nao, mol.nao), dtype=np.complex128)
+    intors = ('int3c2e', 'int3c1e', 'int3c1e_r2_origk',
+              'int3c1e_r4_origk', 'int3c1e_r6_origk')
+    fakemol, hl_blocks = pp_int.fake_cell_vnl_so(mol)
+    hl_dims = np.array([len(hl) for hl in hl_blocks])
+    _bas = fakemol._bas
+    ppnl_half = []
+    intors = ('int1e_ovlp', 'int1e_r2_origi', 'int1e_r4_origi')
+    for i, intor in enumerate(intors):
+        fakemol._bas = _bas[hl_dims>i]
+        if fakemol.nbas > 0:
+            ppnl_half.append(intor_cross(intor, fakemol, mol))
+        else:
+            ppnl_half.append(None)
+    fakemol._bas = _bas
+    nao = mol.nao
+    offset = [0] * 3
+    for ib, hl in enumerate(hl_blocks):
+        sh0 = ib
+        sh1 = ib+1
+        ss  = (sh0, sh1, sh0, sh1)
+        l = fakemol.bas_angular(ib)
+        Lx = fakemol.intor('int1e_cg_irxp', shls_slice=ss)
+        nd = 2 * l + 1
+        hl_dim = hl.shape[0]
+        ilp = np.empty((hl_dim, nd, nao))
+        for i in range(hl_dim):
+            p0 = offset[i]
+            if ppnl_half[i] is None:
+                ilp[i] = 0.
+            else:
+                ilp[i] = ppnl_half[i][p0:p0+nd]
+            offset[i] = p0 + nd
+        vpploc += np.einsum('inp,ij,jmq, smn->spq', ilp.conj(), hl, ilp, Lx)
+    return vpploc
