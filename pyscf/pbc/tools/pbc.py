@@ -22,6 +22,7 @@ from pyscf import lib
 from pyscf.lib import logger
 from pyscf.gto import ATM_SLOTS, BAS_SLOTS, ATOM_OF, PTR_COORD
 from pyscf.pbc.lib.kpts_helper import get_kconserv, get_kconserv3  # noqa
+from pyscf.pbc.lib.kpts_helper import intersection
 from pyscf import __config__
 
 FFT_ENGINE = getattr(__config__, 'pbc_tools_pbc_fft_engine', 'NUMPY+BLAS')
@@ -343,31 +344,33 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
         # answers to agree
         b = cell.reciprocal_vectors()
         box_edge = np.einsum('i,ij->ij', np.asarray(mesh)//2+0.5, b)
-        assert (all(np.linalg.solve(box_edge.T, k).round(9).astype(int)==0))
-        reduced_coords = np.linalg.solve(box_edge.T, kG.T).T.round(9)
-        on_edge = reduced_coords.astype(int)
+        assert (all(np.linalg.solve(box_edge.T, k).astype(int)==0))
+        reduced_coords = np.linalg.solve(box_edge.T, kG.T).T
+        on_edge_p1 = abs(reduced_coords - 1) < 1e-9
+        on_edge_m1 = abs(reduced_coords + 1) < 1e-9
         if cell.dimension >= 1:
-            equal2boundary |= reduced_coords[:,0] == 1
-            equal2boundary |= reduced_coords[:,0] ==-1
-            kG[on_edge[:,0]== 1] -= 2 * box_edge[0]
-            kG[on_edge[:,0]==-1] += 2 * box_edge[0]
+            equal2boundary |= on_edge_p1[:,0]
+            equal2boundary |= on_edge_m1[:,0]
+            kG[reduced_coords[:,0]> 1] -= 2 * box_edge[0]
+            kG[reduced_coords[:,0]<-1] += 2 * box_edge[0]
         if cell.dimension >= 2:
-            equal2boundary |= reduced_coords[:,1] == 1
-            equal2boundary |= reduced_coords[:,1] ==-1
-            kG[on_edge[:,1]== 1] -= 2 * box_edge[1]
-            kG[on_edge[:,1]==-1] += 2 * box_edge[1]
+            equal2boundary |= on_edge_p1[:,1]
+            equal2boundary |= on_edge_m1[:,1]
+            kG[reduced_coords[:,1]> 1] -= 2 * box_edge[1]
+            kG[reduced_coords[:,1]<-1] += 2 * box_edge[1]
         if cell.dimension == 3:
-            equal2boundary |= reduced_coords[:,2] == 1
-            equal2boundary |= reduced_coords[:,2] ==-1
-            kG[on_edge[:,2]== 1] -= 2 * box_edge[2]
-            kG[on_edge[:,2]==-1] += 2 * box_edge[2]
+            equal2boundary |= on_edge_p1[:,2]
+            equal2boundary |= on_edge_m1[:,2]
+            kG[reduced_coords[:,2]> 1] -= 2 * box_edge[2]
+            kG[reduced_coords[:,2]<-1] += 2 * box_edge[2]
 
     absG2 = np.einsum('gi,gi->g', kG, kG)
     G0_idx = []
 
-    kpts = k.reshape(1,3)
     if hasattr(mf, 'kpts'):
         kpts = mf.kpts
+    else:
+        kpts = k.reshape(1,3)
     Nk = len(kpts)
 
     if exxdiv == 'vcut_sph':  # PRB 77 193110
@@ -626,9 +629,6 @@ def get_lattice_Ls(cell, nimgs=None, rcut=None, dimension=None, discard=True):
     scaled_atom_coords = cell.get_scaled_atom_coords()
     atom_boundary_max = scaled_atom_coords[:,:dimension].max(axis=0)
     atom_boundary_min = scaled_atom_coords[:,:dimension].min(axis=0)
-    if (np.any(atom_boundary_max > 1) or np.any(atom_boundary_min < -1)):
-        atom_boundary_max[atom_boundary_max > 1] = 1
-        atom_boundary_min[atom_boundary_min <-1] = -1
     ovlp_penalty = atom_boundary_max - atom_boundary_min
     dR = ovlp_penalty.dot(a[:dimension])
     dR_basis = np.diag(dR)
@@ -658,14 +658,28 @@ def get_lattice_Ls(cell, nimgs=None, rcut=None, dimension=None, discard=True):
                              np.arange(-bounds[2], bounds[2]+1)))
     Ls = np.dot(Ts[:,:dimension], a[:dimension])
 
-    if discard:
-        ovlp_penalty += 1e-200  # avoid /0
-        Ts_scaled = (Ts[:,:dimension] + 1e-200) / ovlp_penalty
-        ovlp_penalty_fac = 1. / abs(Ts_scaled).min(axis=1)
-        Ls_mask = np.linalg.norm(Ls, axis=1) * (1-ovlp_penalty_fac) < rcut
+    if discard and len(Ls) > 1:
+        r = cell.atom_coords()
+        rr = r[:,None] - r
+        dist_max = np.linalg.norm(rr, axis=2).max()
+        Ls_mask = np.linalg.norm(Ls, axis=1) < rcut + dist_max
         Ls = Ls[Ls_mask]
     return np.asarray(Ls, order='C')
 
+def check_lattice_sum_range(cell, Ls):
+    '''
+    Evaluates whether the lattice summation range is sufficient.
+
+    This function calculates the minimum distance between atoms in the primary
+    unit cell and atoms in lattice images *not* included in the specified
+    lattice sum vectors (Ls).
+    '''
+    Ls_full = get_lattice_Ls(cell, rcut=cell.rcut*1.5, discard=False)
+    Ls_idx = intersection(Ls_full, Ls)
+    Ls_remaining = np.setdiff1d(np.arange(len(Ls_full)), Ls_idx)
+    atom_coords = cell.atom_coords()
+    atoms_outside = (Ls_full[Ls_remaining,None] + atom_coords).reshape(-1, 3)
+    return np.linalg.norm(atoms_outside[:,None] - atom_coords, axis=2).min()
 
 def super_cell(cell, ncopy, wrap_around=False):
     '''Create an ncopy[0] x ncopy[1] x ncopy[2] supercell of the input cell
