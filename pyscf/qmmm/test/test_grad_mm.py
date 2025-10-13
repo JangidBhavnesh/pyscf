@@ -36,29 +36,28 @@ def setUpModule():
                   (1.894, 0.486, 0.335),
                   (0.451, 0.165,-0.083)]
     mm_charges = [-1.040, 0.520, 0.520]
-    mm_radii = [0.63, 0.32, 0.32]
+    mm_radii = [6.3, 0.32, 0.32]
 
 def tearDownModule():
     global mol, mm_coords, mm_charges, mm_radii
 
 
 class KnowValues(unittest.TestCase):
-    @unittest.skip('gaussian model gradients')
     def test_grad_mm(self):
         mf = itrf.mm_charge(scf.RHF(mol), mm_coords, mm_charges, mm_radii)
         e_hf = mf.kernel()
-        self.assertAlmostEqual(e_hf, -76.00028338468692, 8)
+        self.assertAlmostEqual(e_hf, -76.02861628942037, 8)
 
         # qm grad
         g_hf = itrf.mm_charge_grad(grad.RHF(mf), mm_coords, mm_charges, mm_radii)
         g_hf_qm = g_hf.kernel()
-        self.assertAlmostEqual(numpy.linalg.norm(g_hf_qm), 0.031003880070795818, 6)
+        self.assertAlmostEqual(numpy.linalg.norm(g_hf_qm), 0.04561356204333569, 6)
 
         # mm grad
         g_hf_mm_h1 = g_hf.grad_hcore_mm(mf.make_rdm1())
         g_hf_mm_nuc = g_hf.grad_nuc_mm()
-        self.assertAlmostEqual(numpy.linalg.norm(g_hf_mm_h1), 0.5108777013806877, 6)
-        self.assertAlmostEqual(numpy.linalg.norm(g_hf_mm_nuc), 0.4915404602273757, 6)
+        self.assertAlmostEqual(numpy.linalg.norm(g_hf_mm_h1), 0.38906742696919, 6)
+        self.assertAlmostEqual(numpy.linalg.norm(g_hf_mm_nuc), 0.37076081680889555, 6)
 
         # finite difference for MM atoms
         mm_coords1 = [(1.369, 0.147,-0.395),
@@ -74,6 +73,35 @@ class KnowValues(unittest.TestCase):
         e2 = mf2.kernel()
         self.assertAlmostEqual((e1 - e2) / 0.002*lib.param.BOHR,
                                (g_hf_mm_h1+g_hf_mm_nuc)[0,1], 6)
+
+    def test_grad_mm_gaussian_model(self):
+        mm_r20 = numpy.array(mm_radii)*20
+        mf = itrf.mm_charge(scf.RHF(mol), mm_coords, mm_charges, mm_r20)
+        g_hf = itrf.mm_charge_grad(grad.RHF(mf), mm_coords, mm_charges, mm_r20)
+        g_hf_qm_nuc = g_hf.grad_nuc()
+        g_hf_mm_nuc = g_hf.grad_nuc_mm()
+
+        # finite difference for QM atoms
+        mol1 = mol.set_geom_('''O       -1.464   0.099   0.300
+                                H       -1.956   0.624  -0.3395
+                                H       -1.797  -0.799   0.206''', inplace=False)
+        e1 = itrf.mm_charge(scf.RHF(mol1), mm_coords, mm_charges, mm_r20).energy_nuc()
+        mol1 = mol.set_geom_('''O       -1.464   0.099   0.300
+                                H       -1.956   0.624  -0.3405
+                                H       -1.797  -0.799   0.206''', inplace=False)
+        e2 = itrf.mm_charge(scf.RHF(mol1), mm_coords, mm_charges, mm_r20).energy_nuc()
+        self.assertAlmostEqual((e1 - e2) / 0.001*lib.param.BOHR, g_hf_qm_nuc[1,2], 6)
+
+        # finite difference for MM atoms
+        mm_coords1 = [(1.369, 0.147,-0.395),
+                      (1.894, 0.486, 0.335),
+                      (0.451, 0.165,-0.083)]
+        e1 = itrf.mm_charge(scf.RHF(mol), mm_coords1, mm_charges, mm_r20).energy_nuc()
+        mm_coords2 = [(1.369, 0.145,-0.395),
+                      (1.894, 0.486, 0.335),
+                      (0.451, 0.165,-0.083)]
+        e2 = itrf.mm_charge(scf.RHF(mol), mm_coords2, mm_charges, mm_r20).energy_nuc()
+        self.assertAlmostEqual((e1 - e2) / 0.002*lib.param.BOHR, g_hf_mm_nuc[0,1], 6)
 
     def test_grad_mm_point_charge(self):
         mf = itrf.mm_charge(scf.RHF(mol), mm_coords, mm_charges)
