@@ -27,89 +27,21 @@ def prange(start, end, step):
     for i in range(start, end, step):
         yield i, min(i+step, end)
 
-def _dfnevpt2_eris_incore(mc, mo_coeff, with_df):
+def _cvcveris(mc, mo_coeff, with_df):
     '''
-    Construction of ERIs required by NEVPT2 in MO basis using DF intermediates with incore memory.
-    '''
-    ncore = mc.ncore
-    ncas = mc.ncas
-    nmo = mo_coeff.shape[1]
-    nvir = nmo - ncore - ncas
-
-    def eri_from_dfinter(Lpq, lpqslice, lrsslice, blksize=2000):
-        Lpq = np.asarray(Lpq, dtype=np.float64, order='C')
-        naux = Lpq.shape[0]
-
-        A = Lpq[(slice(None),) + lpqslice]
-        B = Lpq[(slice(None),) + lrsslice]
-
-        pA, qA = A.shape[1], A.shape[2]
-        pB, qB = B.shape[1], B.shape[2]
-
-        eriout = np.zeros((pA, qA, pB, qB), dtype=Lpq.dtype, order='C')
-        # Edge cases
-        if pA * qA == 0 or pB * qB == 0:
-            return eriout
-
-        eriout = eriout.reshape(pA * qA, pB * qB)
-
-        nblk = max(1, int(blksize))
-
-        for p0 in range(0, naux, nblk):
-            p1 = min(p0 + nblk, naux)
-            Ablk = A[p0:p1].reshape(-1, pA * qA)
-            Bblk = B[p0:p1].reshape(-1, pB * qB)
-            eriout += Ablk.T @ Bblk
-        return eriout.reshape(pA, qA, pB, qB)
-
-    Luv = lib.unpack_tril(with_df._cderi)
-    Lpq = np.tensordot(mo_coeff.conj().T, np.dot(Luv, mo_coeff), axes=([1],[1])).transpose(1,0,2)
-    Luv = None
-
-    # ppaa = np.einsum('lpq, lrs->pqrs', Lpq, Lpq[:, ncore:ncore+ncas, ncore:ncore+ncas])
-    # papa = np.einsum('lpq, lrs->pqrs', Lpq[:, :, ncore:ncore+ncas], Lpq[:, :, ncore:ncore+ncas])
-    # pacv = np.einsum('lpq, lrs->pqrs', Lpq[:, :, ncore+ncas:], Lpq[:, :ncore, ncore+ncas:])
-    # cvcv = np.einsum('lpq, lrs->pqrs', Lpq[:, :ncore, ncore+ncas:], Lpq[:, :ncore, ncore+ncas:])
-
-    blksize = with_df.blockdim
-
-    ppaa = eri_from_dfinter(Lpq, (slice(None), slice(None)),
-                        (slice(ncore, ncore+ncas), slice(ncore, ncore+ncas)), blksize)
-
-    papa = eri_from_dfinter(Lpq, (slice(None), slice(ncore, ncore+ncas)),
-                        (slice(None), slice(ncore, ncore+ncas)), blksize)
-
-    pacv = eri_from_dfinter(Lpq, (slice(None), slice(ncore, ncore+ncas)),
-                        (slice(0, ncore), slice(ncore+ncas, None)), blksize)
-
-    cvcv = eri_from_dfinter(Lpq, (slice(0, ncore), slice(ncore+ncas, None)),
-                        (slice(0, ncore), slice(ncore+ncas, None)), blksize)
-    cvcv = cvcv.reshape(ncore*nvir, ncore*nvir)
-
-    return papa, ppaa, pacv, cvcv
-
-def _dfnevpt2_eris_outcore(mc, mo_coeff, with_df):
-    '''
-    Construction of ERIs required by NEVPT2 in MO basis using DF intermediates.
-
-    This could have been a child class of _ERIS in mcscf/df.py but in CASSCF the ERIs
-    such as ppaa and papa are also stored on disk, while the current NEVPT2 implementation only
-    needs cvcv on disk. Additionally the MCSCF class does create some other intermediates which
-    are not needed for NEVPT2. Hence, a separate function is implemented here.
+    Construction of cvcv ERIs required by NEVPT2 in MO basis using DF intermediates.
 
     Steps:
     1. Transform DF integrals to MO basis in blocks of auxiliary functions to get (L|pq)
-    2. Using (L|pq), construct the papa, and ppaa as done in mcscf/df.py
-    3. Construct the pacv and cvcv intermediates required for NEVPT2
+    2. Using (L|pq), construct the cvcv intermediates required for NEVPT2.
     '''
+
     log = logger.Logger(mc.stdout, mc.verbose)
 
     nao, nmo = mo_coeff.shape
     ncore = mc.ncore
     ncas = mc.ncas
-    nocc = ncore + ncas
-    nvir = nmo - nocc
-    nav = ncas + nvir
+    nvir = nmo - ncore - ncas
     naoaux = with_df.get_naoaux()
 
     mem_now = lib.current_memory()[0]
@@ -118,20 +50,12 @@ def _dfnevpt2_eris_outcore(mc, mo_coeff, with_df):
     # Step-1: transform DF integrals to MO basis to get (L|pq)
     t1 = t0 = (logger.process_clock(), logger.perf_counter())
 
-    ppaa = np.empty((nmo,nmo,ncas,ncas))
-    papa = np.empty((nmo,ncas,nmo,ncas))
-
     mo = np.asarray(mo_coeff, order='F')
 
     fxpp = lib.H5TmpFile()
 
     blksize = max(4, int(min(with_df.blockdim, (max_memory*.95e6/8-naoaux*nmo*ncas)/3/nmo**2)))
-
-    bufpa = np.empty((naoaux,nmo,ncas))
-    bufcv = np.empty((naoaux,ncore,nvir))
     bufs1 = np.empty((blksize,nmo,nmo))
-
-    dgemm = lib.numpy_helper._dgemm
     fmmm = _ao2mo.libao2mo.AO2MOmmm_nr_s2_iltj
     fdrv = _ao2mo.libao2mo.AO2MOnr_e2_drv
     ftrans = _ao2mo.libao2mo.AO2MOtranse2_nr_s2
@@ -148,46 +72,13 @@ def _dfnevpt2_eris_outcore(mc, mo_coeff, with_df):
                 (ctypes.c_int*4)(0, nmo, 0, nmo),
                 ctypes.c_void_p(0), ctypes.c_int(0))
         fxpp_keys.append([str(k), b0, b0+naux])
-        fxpp[str(k)] = bufpp.transpose(1,2,0)
-        bufpa[b0:b0+naux] = bufpp[:,:,ncore:nocc]
-        bufcv[b0:b0+naux] = bufpp[:, :ncore, nocc:]
+        fxpp[str(k)] = bufpp.transpose(1,2,0)[:ncore, ncore+ncas:, ]
         b0 += naux
 
     bufs1 = bufpp = None
     t1 = log.timer('density fitting ao2mo step-1', *t0)
 
-    # Step-2.1: from the transfomed (L|pq), build papa
-    mem_now = lib.current_memory()[0]
-    nblk = int(max(8, min(nmo, ((max_memory-mem_now)*1e6/8-bufpa.size)/(ncas**2*nmo))))
-    bufs1 = np.empty((nblk,ncas,nmo,ncas))
-    for p0, p1 in prange(0, nmo, nblk):
-        tmp = bufs1[:p1-p0]
-        dgemm('T', 'N', (p1-p0)*ncas, nmo*ncas, naoaux,
-                bufpa.reshape(naoaux,-1), bufpa.reshape(naoaux,-1),
-                tmp.reshape(-1,nmo*ncas), 1, 0, p0*ncas, 0, 0)
-        papa[p0:p1] = tmp.reshape(p1-p0,ncas,nmo,ncas)
-
-    bufaa = bufpa[:,ncore:nocc,:].copy().reshape(-1,ncas**2)
-    bufs1 = bufpa = None
-    t1 = log.timer('density fitting papa step-2.1', *t1)
-
-    # Step-2.2: from the transfomed (L|pq), build ppaa
-    mem_now = lib.current_memory()[0]
-    nblk = int(max(8, min(nmo, (max_memory-mem_now)*1e6/8/(nmo*naoaux+ncas**2*nmo))))
-    bufs1 = np.empty((nblk,nmo,naoaux))
-    bufs2 = np.empty((nblk,nmo,ncas,ncas))
-    for p0, p1 in prange(0, nmo, nblk):
-        nrow = p1 - p0
-        buf = bufs1[:nrow]
-        tmp = bufs2[:nrow].reshape(-1,ncas**2)
-        for key, col0, col1 in fxpp_keys:
-            buf[:nrow,:,col0:col1] = fxpp[key][p0:p1]
-        lib.dot(buf.reshape(-1,naoaux), bufaa, 1, tmp)
-        ppaa[p0:p1] = tmp.reshape(p1-p0,nmo,ncas,ncas)
-    bufs1 = bufs2 = buf = None
-    t1 = log.timer('density fitting ppaa step-2.2', *t1)
-
-    # Step-3: from the transfomed (L|pq), build pacv and cvcv
+    # Step-2: from the transfomed (L|pq), build pacv and cvcv
     tmpdir = lib.param.TMPDIR
     cvcvfile = tempfile.NamedTemporaryFile(dir=tmpdir)
     # Edge cases
@@ -195,37 +86,32 @@ def _dfnevpt2_eris_outcore(mc, mo_coeff, with_df):
         f5 = lib.H5TmpFile(cvcvfile.name, 'w')
         cvcv = f5.create_dataset('eri_mo', (ncore*nvir,ncore*nvir), 'f8')
         cvcv[:,:] = 0
-        pacv = np.zeros((nmo,ncas,ncore,nvir))
     else:
         mem_now = lib.current_memory()[0]
-        nblk = int(max(8, min(nmo, (max_memory-mem_now)*1e6/8/(nav*naoaux+nav*ncore*nvir))))
-        pacv = np.empty((nmo,ncas,ncore,nvir))
-        bufs1 = np.empty((nblk,nav,naoaux))
-        bufs2 = np.empty((nblk,nav,ncore,nvir))
-        bufcv = bufcv.reshape(naoaux, ncore*nvir)
+        nblk = int(max(8, min(nmo, (max_memory-mem_now)*1e6/8/(ncore*naoaux+nvir*ncore*nvir))))
+        buf = np.empty((ncore, nvir, naoaux))
+        bufs1 = np.empty((nblk,nvir,ncore*nvir))
+        bufs2 = np.empty((nblk, nvir, naoaux))
         f5 = lib.H5TmpFile(cvcvfile.name, 'w')
         cvcv = f5.create_dataset('eri_mo', (ncore*nvir,ncore*nvir), 'f8')
-        for p0, p1 in prange(0, nmo, nblk):
+        for p0, p1 in prange(0, ncore, nblk):
             nrow = p1 - p0
-            buf = bufs1[:nrow]
-            tmp = bufs2[:nrow].reshape(-1,ncore*nvir)
+            tmp = bufs1[:nrow].reshape(nrow*nvir, -1)
             for key, col0, col1 in fxpp_keys:
-                buf[:nrow,:,col0:col1] = fxpp[key][p0:p1,ncore:]
+                buf[:,:,col0:col1] = fxpp[key][p0:p1]
 
-            lib.dot(buf.reshape(-1,naoaux), bufcv, 1, tmp)
+            bufs3 = buf.reshape(-1, naoaux).T
+            bufs2 = buf[:nrow].reshape(nrow*nvir, naoaux)
+            lib.dot(bufs2, bufs3, 1.0, tmp)
 
-            tmp2 = tmp.reshape(-1,nav,ncore,nvir)
-            pacv[p0:p1] = tmp2[:,:ncas]
-            if p0 < ncore:
-                m  = min(p1, ncore) - p0
-                r0 = p0*nvir
-                r1 = min(p1, ncore)*nvir
-                cvcv[r0:r1,:] = tmp2[:m,ncas:].reshape(m*nvir,ncore*nvir)
+            r0 = p0*nvir
+            r1 = min(p1, ncore)*nvir
+            cvcv[r0:r1,:] = tmp
 
-        bufs1 = bufs2 = buf = bufcv = None
-    t1 = log.timer('density fitting pacv and cvcv step-3', *t1)
-    t0 = log.timer('density fitting ao2mo', *t0)
-    return papa, ppaa, pacv, cvcvfile
+        bufs1 = bufs2 = bufs3 = buf = None
+    t1 = log.timer('density fitting step-2', *t1)
+    t0 = log.timer('density fitting cvcv', *t0)
+    return cvcvfile
 
 def _mem_usage(ncore, ncas, nmo):
     '''Estimate memory usage (in MB) for DF-NEVPT2 ERIs
@@ -244,18 +130,31 @@ def _ERIS(mc, mo, with_df, method='incore'):
     ncore = mc.ncore
     ncas = mc.ncas
     nmo = mo.shape[1]
-    max_memory = max(4000, 0.9*mc.max_memory-lib.current_memory()[0])
+    nvir = nmo - ncore - ncas
+    moa = mo[:, ncore:ncore+ncas]
+    moc = mo[:, :ncore]
+    mov = mo[:, ncore+ncas:]
 
+    max_memory = max(4000, 0.9*mc.max_memory-lib.current_memory()[0])
     mem_incore, mem_outcore = _mem_usage(ncore, ncas, nmo)
     mem_now = lib.current_memory()[0]
-    if (method == 'incore' and with_df is not None and
-        (mem_incore+mem_now < mc.max_memory*.9)):
-        papa, ppaa, pacv, cvcv = _dfnevpt2_eris_incore(mc, mo, with_df)
-    elif with_df is not None and (mem_outcore < max_memory):
-        papa, ppaa, pacv, cvcv = _dfnevpt2_eris_outcore(mc, mo, with_df)
+
+    if with_df is not None and ((mem_incore+mem_now < mc.max_memory*.9) or mem_outcore < max_memory):
+        papa = with_df.ao2mo([mo, moa, mo, moa], compact=False)
+        ppaa = with_df.ao2mo([mo, mo, moa, moa], compact=False)
+        pacv = with_df.ao2mo([mo, moa, moc, mov], compact=False)
+        papa = papa.reshape(nmo, ncas, nmo, ncas)
+        ppaa = ppaa.reshape(nmo, nmo, ncas, ncas)
+        pacv = pacv.reshape(nmo, ncas, ncore, nvir)
     else:
         raise RuntimeError('DF-NEVPT2 ERIs cannot be constructed with the available memory %d MB'
-                           % (max_memory))
+                    % (max_memory))
+
+    if (method == 'incore'):
+        cvcv = with_df.ao2mo([moc, mov, moc, mov], compact=False)
+    else:
+        cvcv = _cvcveris(mc, mo, with_df)
+
     dmcore = np.dot(mo[:,:ncore], mo[:,:ncore].conj().T)
     vj, vk = mc._scf.get_jk(mc.mol, dmcore)
     vhfcore = reduce(np.dot, (mo.T, vj*2-vk, mo))
