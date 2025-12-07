@@ -22,14 +22,32 @@ from pyscf import lib, gto
 from pyscf.data import radii
 from pyscf.dft import gen_grid
 from pyscf.solvent import pcm
-from pyscf.solvent._attach_solvent import _for_scf
+from pyscf.solvent import _attach_solvent
 from pyscf.lib import logger
 
-@lib.with_doc(_for_scf.__doc__)
+@lib.with_doc(_attach_solvent._for_scf.__doc__)
 def smd_for_scf(mf, solvent_obj=None, dm=None):
     if solvent_obj is None:
         solvent_obj = SMD(mf.mol)
-    return _for_scf(mf, solvent_obj, dm)
+    return _attach_solvent._for_scf(mf, solvent_obj, dm)
+
+@lib.with_doc(_attach_solvent._for_casscf.__doc__)
+def smd_for_casscf(mc, solvent_obj=None, dm=None):
+    if solvent_obj is None:
+        if isinstance(getattr(mc._scf, 'with_solvent', None), SMD):
+            solvent_obj = mc._scf.with_solvent
+        else:
+            solvent_obj = SMD(mc.mol)
+    return _attach_solvent._for_casscf(mc, solvent_obj, dm)
+
+@lib.with_doc(_attach_solvent._for_casci.__doc__)
+def smd_for_casci(mc, solvent_obj=None, dm=None):
+    if solvent_obj is None:
+        if isinstance(getattr(mc._scf, 'with_solvent', None), SMD):
+            solvent_obj = mc._scf.with_solvent
+        else:
+            solvent_obj = SMD(mc.mol)
+    return _attach_solvent._for_casci(mc, solvent_obj, dm)
 
 # Inject PCM to SCF, TODO: add it to other methods later
 from pyscf import scf

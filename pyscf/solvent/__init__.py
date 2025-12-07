@@ -173,13 +173,18 @@ def SMD(method_or_mol, solvent_obj=None, dm=None):
     >>> mc.kernel()
     '''
     from pyscf import gto
-    from pyscf import scf
+    from pyscf import scf, mcscf
 
     method = method_or_mol
     if isinstance(method, gto.mole.Mole):
         return smd.SMD(method)
     elif isinstance(method, scf.hf.SCF):
         return smd.smd_for_scf(method, solvent_obj, dm)
+    elif isinstance(method, mcscf.casci.CASBase):
+        if isinstance(method, mcscf.mc1step.CASSCF):
+            return smd.smd_for_casscf(method, solvent_obj, dm)
+        elif isinstance(method, mcscf.casci.CASCI):
+            return smd.smd_for_casci(method, solvent_obj, dm)
     raise RuntimeError(f'SMD for {method} not available')
 
 SMD = SMD
