@@ -429,8 +429,12 @@ class CASCIWithSolvent(_Solvation):
         with_solvent = self.with_solvent
 
         log = logger.new_logger(self)
-        log.info('\n** Self-consistently update the solvent effects for %s **',
-                 self.__class__.__name__)
+        if with_solvent.frozen:
+            log.info('\n** One shot (frozen) solvent effects for %s **',
+                    self.__class__.__name__)
+        else:
+            log.info('\n** Self-consistently update the solvent effects for %s **',
+                    self.__class__.__name__)
         log1 = copy.copy(log)
         log1.verbose -= 1  # Suppress a few output messages
 
@@ -450,6 +454,13 @@ class CASCIWithSolvent(_Solvation):
             if with_solvent.e is not None:
                 edup = numpy.einsum('ij,ji->', with_solvent.v, dm)
                 self.e_tot += with_solvent.e - edup
+
+                if getattr(self.with_solvent, 'method', '').upper() == 'SMD':
+                    e_cds = self.with_solvent.get_cds()
+                    if isinstance(e_cds, numpy.ndarray):
+                        e_cds = e_cds[with_solvent.state_id]
+                    self.e_tot += e_cds
+                    log.info('CDS correction = %.15g', e_cds)
 
             if not with_solvent.frozen:
                 with_solvent.e, with_solvent.v = with_solvent.kernel(dm)
