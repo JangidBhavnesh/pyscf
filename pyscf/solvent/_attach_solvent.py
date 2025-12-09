@@ -347,6 +347,13 @@ To enable the solvent model for CASSCF, a decoration to CASSCF object as below n
                      'adding E(solvent) = %.15g to total energy:\n'
                      '    E(CASSCF+solvent) = %.15g', edup, with_solvent.e, e_tot)
 
+            if getattr(self.with_solvent, 'method', '').upper() == 'SMD':
+                e_cds = self.with_solvent.get_cds()
+                if isinstance(e_cds, numpy.ndarray):
+                    e_cds = e_cds[with_solvent.state_id]
+                e_tot += e_cds
+                log.info('CDS correction = %.15g', e_cds)
+
         # Update solvent effects for next iteration if needed
         if not with_solvent.frozen:
             with_solvent.e, with_solvent.v = with_solvent.kernel(dm)
