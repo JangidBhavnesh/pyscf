@@ -450,9 +450,12 @@ class PCM(lib.StreamObject):
         v_grids = self.v_grids_n - v_grids_e
 
         b = numpy.dot(R, v_grids.T)
-        q = numpy.linalg.solve(K, b).T
-
-        vK_1 = numpy.linalg.solve(K.T, v_grids.T)
+        # np.linalg.solve is slow to solve these linear equations,
+        # so using GRMS to solve these linear equations, which is much faster.
+        # q = numpy.linalg.solve(K, b).T
+        # vK_1 = numpy.linalg.solve(K.T, v_grids.T)
+        q = numpy.atleast_2d(lib.linalg_helper.solve(K.dot, b.ravel()))
+        vK_1 = numpy.atleast_2d(lib.linalg_helper.solve(K.T.dot, v_grids.T.reshape(-1))).T
         qt = numpy.dot(R.T, vK_1).T
         q_sym = (q + qt)/2.0
 
