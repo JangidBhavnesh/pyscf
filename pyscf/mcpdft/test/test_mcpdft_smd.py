@@ -1,11 +1,6 @@
-#!/usr/bin/env python
-'''
-An example of using SMD solvent models in the mean-field calculation and CASCI calculations.
-'''
-
 from pyscf import gto, scf, solvent, mcscf, lib, mcpdft
-from pyscf.scf.hf import RHF
 from pyscf.solvent import SMD
+
 
 # Some tests for the SMD solvent model in MC-PDFT calculations.
 def get_mol(basis='6-31G', charge=0, spin=0, verbose=lib.logger.INFO, max_memory=120000):
@@ -33,7 +28,7 @@ def compare_dft_pdft(e1, e2):
 mol = get_mol()
 mol.build()
 
-# To use the SMD solvent model, one should create a solvent object and 
+# To use the SMD solvent model, one should create a solvent object and
 # pass it to the respective SCF/CAS object.
 smdsol = SMD(mol)
 smdsol.solvent = 'methanol'
@@ -58,12 +53,12 @@ if test1:
         dftref.kernel(dm0=dm)
 
         e_ref[func] = dftref.e_tot
-    
+
     mc = mcscf.CASCI(mf, 2, 4)
     mc = solvent.SMD(mc, smdsol)
     mc.kernel()
 
-    # To compute the PDFT energy with solvent, do not re reun the CASCI calculation, just use 
+    # To compute the PDFT energy with solvent, do not re reun the CASCI calculation, just use
     # the density matrix from the CASCI calculation with solvent effects included. Additionally
     # the solvent-solute interaction energy should be evaluated with the CAS density.
     esolv = smdsol.kernel(dm = mc.make_rdm1())[0]
@@ -71,19 +66,16 @@ if test1:
     esmd = esolv + ecds
 
     e_pdft = {}
-    for func in ['LDA', 'PBE', 'M06L', 'PBE0']:
+    for func in ['LDA', 'PBE', 'M06L']:
         otfunc = 't' + func
         mcnew = mcpdft.CASCI(mc, otfunc, 2, 4)
         e_pdft_ = mcnew.compute_pdft_energy_(mo_coeff=mc.mo_coeff, ci=mc.ci, dump_chk=False)[0]
-        
-        # Even for the hybrid functionals, the solvent effect is added in full, because the 
+        # Even for the hybrid functionals, the solvent effect is added in full, because the
         # in the MC-PDFT energy evaluation, the CAS contribution does not include any solvent effects.
         e_pdft_ += esmd
 
         e_pdft[func] = e_pdft_
-        
-        if not (otfunc == 'tPBE0'):
-            compare_dft_pdft(e_ref[func], e_pdft[func])
+        compare_dft_pdft(e_ref[func], e_pdft[func])
     del mf, mc
 
 test2=1
@@ -100,7 +92,7 @@ if test2:
     mc = solvent.SMD(mc, smdsol)
     mc.kernel()
 
-    # To compute the PDFT energy with solvent, do not re reun the CASCI calculation, just use 
+    # To compute the PDFT energy with solvent, do not re reun the CASCI calculation, just use
     # the density matrix from the CASCI calculation with solvent effects included. Additionally
     # the solvent-solute interaction energy should be evaluated with the CAS density.
     esolv = smdsol.kernel(dm = mc.make_rdm1())[0]
@@ -112,7 +104,7 @@ if test2:
     mcnew = mcpdft.CASCI(mc, tCASCI, 2, 4)
     e_pdft_ = mcnew.compute_pdft_energy_(mo_coeff=mc.mo_coeff, ci=mc.ci, dump_chk=False)[0]
     e_pdft_ += esmd
-   
+
     compare_dft_pdft(e_pdft_, mc.e_tot)
     del mf, mc
 
@@ -137,12 +129,12 @@ if test3:
         dftref.kernel(dm0=dm)
 
         e_ref[func] = dftref.e_tot
-    
+
     mc = mcscf.CASSCF(mf, 2, 4)
     mc = solvent.SMD(mc, smdsol)
     mc.kernel()
 
-    # To compute the PDFT energy with solvent, do not re reun the CASCI calculation, just use 
+    # To compute the PDFT energy with solvent, do not re reun the CASCI calculation, just use
     # the density matrix from the CASCI calculation with solvent effects included. Additionally
     # the solvent-solute interaction energy should be evaluated with the CAS density.
     esolv = smdsol.kernel(dm = mc.make_rdm1())[0]
@@ -150,17 +142,15 @@ if test3:
     esmd = esolv + ecds
 
     e_pdft = {}
-    for func in ['LDA', 'PBE', 'M06L', 'PBE0']:
+    for func in ['LDA', 'PBE', 'M06L']:
         otfunc = 't' + func
         mcnew = mcpdft.CASCI(mc, otfunc, 2, 4)
         e_pdft_ = mcnew.compute_pdft_energy_(mo_coeff=mc.mo_coeff, ci=mc.ci, dump_chk=False)[0]
-        
-        # Even for the hybrid functionals, the solvent effect is added in full, because the 
+        # Even for the hybrid functionals, the solvent effect is added in full, because the
         # in the MC-PDFT energy evaluation, the CAS contribution does not include any solvent effects.
         e_pdft_ += esmd
 
         e_pdft[func] = e_pdft_
-        
-        if not (otfunc == 'tPBE0'):
-            compare_dft_pdft(e_ref[func], e_pdft[func])
+
+        compare_dft_pdft(e_ref[func], e_pdft[func])
     del mf, mc
