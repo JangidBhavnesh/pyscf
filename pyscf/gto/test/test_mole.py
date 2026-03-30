@@ -644,6 +644,10 @@ O    SP
         mol1.set_geom_(mol0.atom_coords(), unit=1.)
         mol1.set_geom_(mol0.atom_coords(), unit='Ang', inplace=False)
 
+        r = mol1.atom_coords(unit='Ang')
+        mol1.set_geom_(r, unit='Ang')
+        assert np.array_equal(mol1.atom_coords(unit='Ang'), r)
+
     def test_apply(self):
         from pyscf import scf, mp
         self.assertTrue(isinstance(mol0.apply('RHF'), scf.rohf.ROHF))
@@ -820,7 +824,7 @@ O    SP
         mol1.build(False, False)
         gto.basis.load_ecp('lanl08', 'O')
         gto.format_ecp({'O':'lanl08', 1:'lanl2dz'})
-        self.assertRaises(BasisNotFoundError, gto.format_ecp, {'H':'lan2ldz'})
+        self.assertRaises(RuntimeError, gto.format_ecp, {'H':'lan2ldz'})
 
     def test_condense_to_shell(self):
         mol1 = mol0.copy()
