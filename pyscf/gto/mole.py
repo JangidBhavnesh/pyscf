@@ -3948,8 +3948,11 @@ class Mole(MoleBase):
         return cell
 
     def to_gpu(self):
-        from gpu4pyscf.gto.mole import Mole
-        return Mole.from_cpu(self)
+        from gpu4pyscf.gto import mole
+        if hasattr(mole, 'Mole'):
+            return mole.Mole.from_cpu(self)
+        else: # Mole class is defined in gpu4pyscf 1.5 or newer
+            return self
 
 def _parse_default_basis(basis, uniq_atoms):
     if isinstance(basis, (str, tuple, list)):
@@ -4170,9 +4173,21 @@ def filatov_nuc_mod(nuc_charge, nucprop={}):
     return zeta
 
 def fakemol_for_charges(coords, expnt=1e16):
-    '''Construct a fake Mole object that holds the charges on the given
-    coordinates (coords).  The shape of the charge can be a normal
-    distribution with the Gaussian exponent (expnt).
+    r'''
+    Construct a fake Mole object representing charges located at the given
+    coordinates.
+
+    Each charge is modeled as an s-type Gaussian with exponent (expnt) centered
+    at the corresponding coordinate. The s-type Gaussian functions in the Mole
+    object are normalized to 1:
+        \int N \exp(-\mathrm{expnt}\, r^2)\, d^3r = 1
+
+    Args:
+        coords : ndarray (N, 3)
+            Cartesian coordinates of the charges.
+        expnt : float or ndarray
+            If a scalar is given, the same exponent is used for all charges.
+            If an array is provided, it specifies exponents for each charge.
     '''
     nbas = coords.shape[0]
     expnt = numpy.asarray(expnt).ravel()
@@ -4210,10 +4225,21 @@ def fakemol_for_charges(coords, expnt=1e16):
     return fakemol
 
 def fakemol_for_cgtf_charge(coord, expnt=1e16, contr_coeff=1):
-    '''Constructs a "fake" Mole object that has a Gaussian charge
-    distribution at the specified coordinate (coord).  The charge
-    can be given as a linear combination of Gaussians with
-    exponents expnt and contraction coefficients contr_coeff.
+    r'''
+    Constructs a "fake" Mole object that has **a Gaussian charge distribution**
+    at the specified coordinate (coord). The charge can be given as a linear
+    combination of Gaussians with exponents (expnt) and contraction coefficients
+    (contr_coeff). Note, every Gaussian within the cgtf is normalized to 1:
+        \int N \exp(-\mathrm{expnt}\, r^2)\, d^3r = 1
+
+    Args:
+        coords : ndarray (3,)
+            Cartesian coordinates of the charges.
+        expnt : float or ndarray
+            If an array is provided, it specifies exponents for multiple
+            Gaussians
+        contr_coeff : float or ndarray
+            The contraction coefficients
     '''
     assert coord.shape[0] == 1
     expnt = numpy.asarray(expnt).ravel()
@@ -4229,18 +4255,11 @@ def fakemol_for_cgtf_charge(coord, expnt=1e16, contr_coeff=1):
     fakebas[:,ATOM_OF] = 0#numpy.arange(nbas)
     fakebas[:,NPRIM_OF] = contr_coeff.size
     fakebas[:,NCTR_OF] = 1
-    if expnt.size == 1:
-        expnt = expnt[0]
-        fakebas[:,PTR_EXP] = ptr
-        fakebas[:,PTR_COEFF] = ptr+1
-        fakeenv.append([expnt, 1 / (2*numpy.sqrt(numpy.pi)*gaussian_int(2,expnt))])
-        ptr += 2
-    else:
-        assert expnt.size == contr_coeff.size
-        fakebas[:,PTR_EXP] = ptr
-        fakebas[:,PTR_COEFF] = ptr + contr_coeff.size
-        coeff = contr_coeff / (2 * numpy.sqrt(numpy.pi) * gaussian_int(2, expnt))
-        fakeenv.append(numpy.vstack((expnt, coeff)).ravel())
+    assert expnt.size == contr_coeff.size
+    fakebas[:,PTR_EXP] = ptr
+    fakebas[:,PTR_COEFF] = ptr + contr_coeff.size
+    coeff = contr_coeff / (2 * numpy.sqrt(numpy.pi) * gaussian_int(2, expnt))
+    fakeenv.append(numpy.vstack((expnt, coeff)).ravel())
 
     fakemol = Mole()
     fakemol._atm = fakeatm
@@ -4348,6 +4367,17 @@ def extract_pgto_params(mol, op='diffuse'):
         ke = np.log(c**2 / precision * 50**l + 1e-200) * e
         idx = lib.groupby(basis_id, ke, 'argmax')
     return e[idx], c[idx]
+
+def most_diffuse_pgto(mol):
+    '''
+    Returns the exponent, normalization factor and angular momentum of the most
+    diffuse primitive GTO
+    '''
+    exps, cs = extract_pgto_params(mol, 'diffuse')
+    ls = mol._bas[:,ANG_OF]
+    r2 = np.log(cs**2 / mol.precision * 10**ls + 1e-200) / exps
+    idx = r2.argmax()
+    return exps[idx], cs[idx], ls[idx]
 
 class _MoleLazyCallAdapter:
     '''Adapter for API updates. Should be removed in future'''
