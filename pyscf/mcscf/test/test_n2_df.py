@@ -280,6 +280,7 @@ class KnownValues(unittest.TestCase):
     def test_init(self):
         from pyscf.mcscf import df
         mf = scf.RHF(mol)
+        umf = scf.UHF(mol)
         self.assertTrue(isinstance(mcscf.CASCI(mf, 2, 2), mcscf.casci.CASCI))
         self.assertTrue(isinstance(mcscf.CASCI(mf.density_fit(), 2, 2), df._DFCASCI))
         self.assertTrue(isinstance(mcscf.CASCI(mf.newton(), 2, 2), mcscf.casci.CASCI))
@@ -307,6 +308,11 @@ class KnownValues(unittest.TestCase):
         self.assertTrue(isinstance(mcscf.DFCASSCF(mf.density_fit().newton(), 2, 2), df._DFCASSCF))
         self.assertTrue(isinstance(mcscf.DFCASSCF(mf.newton().density_fit(), 2, 2), df._DFCASSCF))
         self.assertTrue(isinstance(mcscf.DFCASSCF(mf.density_fit().newton().density_fit(), 2, 2), df._DFCASSCF))
+
+        self.assertTrue(isinstance(mcscf.UCASCI(umf, 2, 2), mcscf.ucasci.UCASCI))
+        self.assertTrue(isinstance(mcscf.UCASCI(umf.density_fit(), 2, 2), df._DFUCASCI))
+        self.assertTrue(isinstance(mcscf.UCASSCF(umf, 2, 2), mcscf.umc1step.UCASSCF))
+        self.assertTrue(isinstance(mcscf.UCASSCF(umf.density_fit(), 2, 2), df._DFUCASSCF))
 
         self.assertTrue(isinstance(mcscf.CASCI(msym, 2, 2), mcscf.casci_symm.CASCI))
         self.assertTrue(isinstance(mcscf.CASCI(msym.density_fit(), 2, 2), df._DFCASCI))
