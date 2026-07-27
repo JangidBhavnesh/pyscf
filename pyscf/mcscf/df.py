@@ -452,18 +452,25 @@ class _DFUERIS:
 
             bufaa = bufpp[:,ncore[0]:nocc[0],ncore[0]:nocc[0]]
             bufAA = bufPP[:,ncore[1]:nocc[1],ncore[1]:nocc[1]]
-            self.aapp += np.einsum('kuv,kpq->uvpq', bufaa, bufpp)
-            self.aaPP += np.einsum('kuv,kpq->uvpq', bufaa, bufPP)
-            self.AApp += np.einsum('kuv,kpq->uvpq', bufAA, bufpp)
-            self.AAPP += np.einsum('kuv,kpq->uvpq', bufAA, bufPP)
+            # self.aapp += np.einsum('kuv,kpq->uvpq', bufaa, bufpp)
+            # self.aaPP += np.einsum('kuv,kpq->uvpq', bufaa, bufPP)
+            # self.AApp += np.einsum('kuv,kpq->uvpq', bufAA, bufpp)
+            # self.AAPP += np.einsum('kuv,kpq->uvpq', bufAA, bufPP)
+            self.aapp += np.tensordot(bufaa, bufpp, axes=(0,0))
+            self.aaPP += np.tensordot(bufaa, bufPP, axes=(0,0))
+            self.AApp += np.tensordot(bufAA, bufpp, axes=(0,0))
+            self.AAPP += np.tensordot(bufAA, bufPP, axes=(0,0))
 
             bufap = bufpp[:,ncore[0]:nocc[0],:]
             bufpa = bufpp[:,:,ncore[0]:nocc[0]]
             bufAP = bufPP[:,ncore[1]:nocc[1],:]
             bufPA = bufPP[:,:,ncore[1]:nocc[1]]
-            self.appa += np.einsum('kup,kqv->upqv', bufap, bufpa)
-            self.apPA += np.einsum('kup,kqv->upqv', bufap, bufPA)
-            self.APPA += np.einsum('kup,kqv->upqv', bufAP, bufPA)
+            # self.appa += np.einsum('kup,kqv->upqv', bufap, bufpa)
+            # self.apPA += np.einsum('kup,kqv->upqv', bufap, bufPA)
+            # self.APPA += np.einsum('kup,kqv->upqv', bufAP, bufPA)
+            self.appa += np.tensordot(bufap, bufpa, axes=(0,0))
+            self.apPA += np.tensordot(bufap, bufPA, axes=(0,0))
+            self.APPA += np.tensordot(bufAP, bufPA, axes=(0,0))
             t1 = log.timer_debug1('DF-UCASSCF integral transformation', *t1)
 
         self.vhf_c = (np.einsum('ipq->pq', self.jkcpp) + self.jC_pp,
