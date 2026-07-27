@@ -234,16 +234,10 @@ def UCASCI(mf_or_mol, ncas, nelecas, ncore=None):
 
     if not isinstance(mf, scf.uhf.UHF):
         mf = mf.to_uhf()
-    if isinstance(mf, _DFHF) and mf.with_df:
-        from pyscf.lib import logger
-        logger.warn(mf, f'DF-UCASCI for DFHF method {mf} is not available. '
-                    'Normal UCASCI method is called.')
-        df_source = True
-        mf = mf.undo_df()
-    else:
-        df_source = False
     mc = ucasci.UCASCI(mf, ncas, nelecas, ncore)
-    mc._scf_df_source = df_source # need flag to reject gradients for DF orbitals
+    if isinstance(mf, _DFHF) and mf.with_df:
+        mc._scf_df_source = True # reject gradients for DF orbitals
+        mc = df.density_fit(mc)
     return mc
 
 
@@ -258,12 +252,9 @@ def UCASSCF(mf_or_mol, ncas, nelecas, ncore=None, frozen=None):
 
     if not isinstance(mf, scf.uhf.UHF):
         mf = mf.to_uhf()
-    if isinstance(mf, _DFHF) and mf.with_df:
-        from pyscf.lib import logger
-        logger.warn(mf, f'DF-UCASSCF for DFHF method {mf} is not available. '
-                    'Normal UCASSCF method is called.')
-        mf = mf.undo_df()
     mc = umc1step.UCASSCF(mf, ncas, nelecas, ncore, frozen)
+    if isinstance(mf, _DFHF) and mf.with_df:
+        mc = df.density_fit(mc)
     return mc
 
 def newton(mc):
