@@ -361,7 +361,12 @@ class _DFHessianCASSCF:
             return super().get_jk(mol, dm, hermi,
                                   with_j=with_j, with_k=with_k, omega=omega)
 
-
+'''
+Note: Currently, I am generating all the cvcv type of integrals required for
+the orbital hessian. This is not memory efficient and can be improved in the future.
+Like it is done in RCASSCF, the cvcv type integrals can be generated from respective
+jk calls.
+'''
 class _DFUERIS:
     def __init__(self, casscf, mo, with_df):
         log = logger.Logger(casscf.stdout, casscf.verbose)
@@ -371,6 +376,26 @@ class _DFUERIS:
         ncas = self.ncas = casscf.ncas
         nocc = (ncore[0] + ncas, ncore[1] + ncas)
         nvir = (nmo - ncore[0], nmo - ncore[1])
+
+        # Memory estimation for DF-UCASSCF integral transformation
+        mem_eris, mem_work = _mem_usage_uhf(ncore, ncas, nmo)
+        mem_now = lib.current_memory()[0]
+        max_memory = max(0, casscf.max_memory*.9-mem_now)
+        nao_pair = nao * (nao + 1) // 2
+        block_words = 2*nao_pair + 2*nmo**2 + 2*nmo
+        mem_block = block_words * 8/1e6
+        mem_required = mem_eris + mem_work + mem_block
+        if mem_required > max_memory:
+            raise RuntimeError(
+                'Not enough memory for DF-UCASSCF integral transformation. '
+                'Required %.3f MB, available %.3f MB'
+                % (mem_required, max_memory))
+
+        blksize = max(1, min(with_df.blockdim,
+                            int((max_memory-mem_eris-mem_work)*1e6
+                                / 8/block_words)))
+        log.debug('DF-UCASSCF integral transformation needs %.3f MB '
+                  'memory, block size %d', mem_required, blksize)
 
         self.jkcpp = np.zeros((ncore[0],nmo,nmo))
         self.jkcPP = np.zeros((ncore[1],nmo,nmo))
@@ -399,10 +424,6 @@ class _DFUERIS:
         fdrv = _ao2mo.libao2mo.AO2MOnr_e2_drv
         ftrans = _ao2mo.libao2mo.AO2MOtranse2_nr_s2
 
-        mem_now = lib.current_memory()[0]
-        max_memory = max(2000, casscf.max_memory*.9-mem_now)
-        blksize = max(4, int(min(with_df.blockdim,
-                                 max_memory*.2e6/8/nmo**2)))
         bufs1 = np.empty((blksize,nmo,nmo))
         bufs2 = np.empty((blksize,nmo,nmo))
 
@@ -606,6 +627,32 @@ class _ERIS:
         vj, vk = casscf.get_jk(mol, dm_core)
         self.vhf_c = reduce(np.dot, (mo.T, vj*2-vk, mo))
         t0 = log.timer('density fitting ao2mo', *t0)
+
+def _mem_usage_uhf(ncore, ncas, nmo):
+    ncore_a, ncore_b = ncore
+    nvir_a = nmo - ncore_a
+    nvir_b = nmo - ncore_b
+    nmo2 = nmo**2
+
+    mem_core = (ncore_a + ncore_b + 4) * nmo2
+    mem_active = 7 * ncas**2 * nmo2
+    mem_response = (2*ncas*nmo*ncore_a*nvir_a +
+                    2*ncas*nmo*ncore_b*nvir_b +
+                    ncore_a**2*nvir_a**2 +
+                    ncore_b**2*nvir_b**2 +
+                    ncore_a*nvir_a*ncore_b*nvir_b)
+    mem_eris = (mem_core + mem_active + mem_response) * 8/1e6
+
+    max_tensor = max(ncore_a*nmo2, ncore_b*nmo2, nmo2,
+                     ncas**2*nmo2,
+                     ncas*nmo*ncore_a*nvir_a,
+                     ncas*nmo*ncore_b*nvir_b,
+                     ncore_a**2*nvir_a**2,
+                     ncore_b**2*nvir_b**2,
+                     ncore_a*nvir_a*ncore_b*nvir_b)
+    mem_work = max_tensor * 2 * 8/1e6
+    return mem_eris, mem_work
+
 
 def _mem_usage(ncore, ncas, nmo):
     outcore = basic = ncas**2*nmo**2*2 * 8/1e6
