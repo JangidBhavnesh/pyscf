@@ -19,7 +19,7 @@
 
 import ctypes
 from functools import reduce
-import numpy
+import numpy as np
 from pyscf import lib
 from pyscf.lib import logger
 from pyscf.ao2mo import _ao2mo
@@ -122,7 +122,7 @@ class _DFCAS:
     def get_veff(self, mol=None, dm=None, hermi=1):
         if dm is None:
             mocore = self.mo_coeff[:,:self.ncore]
-            dm = numpy.dot(mocore, mocore.T) * 2
+            dm = np.dot(mocore, mocore.T) * 2
         vj, vk = self.get_jk(mol, dm, hermi)
         return vj - vk * .5
 
@@ -141,7 +141,7 @@ class _DFCAS:
             ncore = self.ncore
             ncas = self.ncas
             nocc = ncore + ncas
-            mo1 = numpy.dot(mo, u)
+            mo1 = np.dot(mo, u)
             mo1_cas = mo1[:,ncore:nocc]
             paaa = self.with_df.ao2mo([mo1, mo1_cas, mo1_cas, mo1_cas], compact=False)
             return paaa.reshape(nmo,ncas,ncas,ncas)
@@ -165,8 +165,8 @@ class _DFUCAS(_DFCAS):
         if dm is None:
             mocore = (self.mo_coeff[0][:,:self.ncore[0]],
                       self.mo_coeff[1][:,:self.ncore[1]])
-            dm = (numpy.dot(mocore[0], mocore[0].T),
-                  numpy.dot(mocore[1], mocore[1].T))
+            dm = (np.dot(mocore[0], mocore[0].T),
+                  np.dot(mocore[1], mocore[1].T))
         vj, vk = self.get_jk(mol, dm, hermi)
         return vj[0] + vj[1] - vk
 
@@ -323,18 +323,18 @@ class _DFHessianCASSCF:
         log = logger.Logger(self.stdout, self.verbose)
         # Add the approximate diagonal term for orbital hessian
         t1 = t0 = (logger.process_clock(), logger.perf_counter())
-        mo = numpy.asarray(mo_coeff, order='F')
+        mo = np.asarray(mo_coeff, order='F')
         nao, nmo = mo.shape
         ncore = self.ncore
-        eris.j_pc = numpy.zeros((nmo,ncore))
-        k_cp = numpy.zeros((ncore,nmo))
+        eris.j_pc = np.zeros((nmo,ncore))
+        k_cp = np.zeros((ncore,nmo))
         fmmm = _ao2mo.libao2mo.AO2MOmmm_nr_s2_iltj
         fdrv = _ao2mo.libao2mo.AO2MOnr_e2_drv
         ftrans = _ao2mo.libao2mo.AO2MOtranse2_nr_s2
 
         max_memory = self.max_memory - lib.current_memory()[0]
         blksize = max(4, int(min(self.with_df.blockdim, max_memory*.3e6/8/nmo**2)))
-        bufs1 = numpy.empty((blksize,nmo,nmo))
+        bufs1 = np.empty((blksize,nmo,nmo))
         for eri1 in self.with_df.loop(blksize):
             naux = eri1.shape[0]
             buf = bufs1[:naux]
@@ -345,9 +345,9 @@ class _DFHessianCASSCF:
                  ctypes.c_int(naux), ctypes.c_int(nao),
                  (ctypes.c_int*4)(0, nmo, 0, nmo),
                  ctypes.c_void_p(0), ctypes.c_int(0))
-            bufd = numpy.einsum('kii->ki', buf)
-            eris.j_pc += numpy.einsum('ki,kj->ij', bufd, bufd[:,:ncore])
-            k_cp += numpy.einsum('kij,kij->ij', buf[:,:ncore], buf[:,:ncore])
+            bufd = np.einsum('kii->ki', buf)
+            eris.j_pc += np.einsum('ki,kj->ij', bufd, bufd[:,:ncore])
+            k_cp += np.einsum('kij,kij->ij', buf[:,:ncore], buf[:,:ncore])
             t1 = log.timer_debug1('j_pc and k_pc', *t1)
         eris.k_pc = k_cp.T.copy()
         log.timer('ao2mo density fit part', *t0)
@@ -360,6 +360,155 @@ class _DFHessianCASSCF:
         else:
             return super().get_jk(mol, dm, hermi,
                                   with_j=with_j, with_k=with_k, omega=omega)
+
+
+class _DFUERIS:
+    def __init__(self, casscf, mo, with_df):
+        log = logger.Logger(casscf.stdout, casscf.verbose)
+
+        nao, nmo = mo[0].shape
+        ncore = self.ncore = casscf.ncore
+        ncas = self.ncas = casscf.ncas
+        nocc = (ncore[0] + ncas, ncore[1] + ncas)
+        nvir = (nmo - ncore[0], nmo - ncore[1])
+
+        self.jkcpp = np.zeros((ncore[0],nmo,nmo))
+        self.jkcPP = np.zeros((ncore[1],nmo,nmo))
+        self.jC_pp = np.zeros((nmo,nmo))
+        self.jc_PP = np.zeros((nmo,nmo))
+
+        self.aapp = np.zeros((ncas,ncas,nmo,nmo))
+        self.aaPP = np.zeros((ncas,ncas,nmo,nmo))
+        self.AApp = np.zeros((ncas,ncas,nmo,nmo))
+        self.AAPP = np.zeros((ncas,ncas,nmo,nmo))
+        self.appa = np.zeros((ncas,nmo,nmo,ncas))
+        self.apPA = np.zeros((ncas,nmo,nmo,ncas))
+        self.APPA = np.zeros((ncas,nmo,nmo,ncas))
+
+        self.Iapcv = np.zeros((ncas,nmo,ncore[0],nvir[0]))
+        self.IAPCV = np.zeros((ncas,nmo,ncore[1],nvir[1]))
+        self.apCV = np.zeros((ncas,nmo,ncore[1],nvir[1]))
+        self.APcv = np.zeros((ncas,nmo,ncore[0],nvir[0]))
+        self.Icvcv = np.zeros((ncore[0],nvir[0],ncore[0],nvir[0]))
+        self.ICVCV = np.zeros((ncore[1],nvir[1],ncore[1],nvir[1]))
+        self.cvCV = np.zeros((ncore[0],nvir[0],ncore[1],nvir[1]))
+
+        mo = (np.asarray(mo[0], order='F'),
+              np.asarray(mo[1], order='F'))
+        fmmm = _ao2mo.libao2mo.AO2MOmmm_nr_s2_iltj
+        fdrv = _ao2mo.libao2mo.AO2MOnr_e2_drv
+        ftrans = _ao2mo.libao2mo.AO2MOtranse2_nr_s2
+
+        mem_now = lib.current_memory()[0]
+        max_memory = max(2000, casscf.max_memory*.9-mem_now)
+        blksize = max(4, int(min(with_df.blockdim,
+                                 max_memory*.2e6/8/nmo**2)))
+        bufs1 = np.empty((blksize,nmo,nmo))
+        bufs2 = np.empty((blksize,nmo,nmo))
+
+        t1 = t0 = (logger.process_clock(), logger.perf_counter())
+        for eri1 in with_df.loop(blksize):
+            naux = eri1.shape[0]
+            bufpp = bufs1[:naux]
+            bufPP = bufs2[:naux]
+            fdrv(ftrans, fmmm,
+                 bufpp.ctypes.data_as(ctypes.c_void_p),
+                 eri1.ctypes.data_as(ctypes.c_void_p),
+                 mo[0].ctypes.data_as(ctypes.c_void_p),
+                 ctypes.c_int(naux), ctypes.c_int(nao),
+                 (ctypes.c_int*4)(0, nmo, 0, nmo),
+                 ctypes.c_void_p(0), ctypes.c_int(0))
+            fdrv(ftrans, fmmm,
+                 bufPP.ctypes.data_as(ctypes.c_void_p),
+                 eri1.ctypes.data_as(ctypes.c_void_p),
+                 mo[1].ctypes.data_as(ctypes.c_void_p),
+                 ctypes.c_int(naux), ctypes.c_int(nao),
+                 (ctypes.c_int*4)(0, nmo, 0, nmo),
+                 ctypes.c_void_p(0), ctypes.c_int(0))
+
+            bufd = np.einsum('kii->ki', bufpp)
+            bufD = np.einsum('kii->ki', bufPP)
+            self.jkcpp += np.einsum('ki,kpq->ipq',
+                                       bufd[:,:ncore[0]], bufpp)
+            self.jkcpp -= np.einsum('kip,kiq->ipq',
+                                       bufpp[:,:ncore[0]],
+                                       bufpp[:,:ncore[0]])
+            self.jkcPP += np.einsum('ki,kpq->ipq',
+                                       bufD[:,:ncore[1]], bufPP)
+            self.jkcPP -= np.einsum('kip,kiq->ipq',
+                                       bufPP[:,:ncore[1]],
+                                       bufPP[:,:ncore[1]])
+            self.jC_pp += np.einsum('ki,kpq->pq',
+                                       bufD[:,:ncore[1]], bufpp)
+            self.jc_PP += np.einsum('ki,kpq->pq',
+                                       bufd[:,:ncore[0]], bufPP)
+
+            bufaa = bufpp[:,ncore[0]:nocc[0],ncore[0]:nocc[0]]
+            bufAA = bufPP[:,ncore[1]:nocc[1],ncore[1]:nocc[1]]
+            self.aapp += np.einsum('kuv,kpq->uvpq', bufaa, bufpp)
+            self.aaPP += np.einsum('kuv,kpq->uvpq', bufaa, bufPP)
+            self.AApp += np.einsum('kuv,kpq->uvpq', bufAA, bufpp)
+            self.AAPP += np.einsum('kuv,kpq->uvpq', bufAA, bufPP)
+
+            bufap = bufpp[:,ncore[0]:nocc[0],:]
+            bufpa = bufpp[:,:,ncore[0]:nocc[0]]
+            bufAP = bufPP[:,ncore[1]:nocc[1],:]
+            bufPA = bufPP[:,:,ncore[1]:nocc[1]]
+            self.appa += np.einsum('kup,kqv->upqv', bufap, bufpa)
+            self.apPA += np.einsum('kup,kqv->upqv', bufap, bufPA)
+            self.APPA += np.einsum('kup,kqv->upqv', bufAP, bufPA)
+
+            bufcv = bufpp[:,:ncore[0],ncore[0]:]
+            bufCV = bufPP[:,:ncore[1],ncore[1]:]
+            self.cvCV += np.einsum('kiv,kjw->ivjw', bufcv, bufCV)
+
+            bufcc = bufpp[:,:ncore[0],:ncore[0]]
+            bufvv = bufpp[:,ncore[0]:,ncore[0]:]
+            self.Icvcv += np.einsum('kiv,kjw->ivjw',
+                                        bufcv, bufcv) * 2
+            self.Icvcv -= np.einsum('kij,kvw->ivjw',
+                                        bufcc, bufvv)
+            self.Icvcv -= np.einsum('kiw,kjv->ivjw',
+                                        bufcv, bufcv)
+
+            bufCC = bufPP[:,:ncore[1],:ncore[1]]
+            bufVV = bufPP[:,ncore[1]:,ncore[1]:]
+            self.ICVCV += np.einsum('kiv,kjw->ivjw',
+                                        bufCV, bufCV) * 2
+            self.ICVCV -= np.einsum('kij,kvw->ivjw',
+                                        bufCC, bufVV)
+            self.ICVCV -= np.einsum('kiw,kjv->ivjw',
+                                        bufCV, bufCV)
+
+            bufpv = bufpp[:,:,ncore[0]:]
+            bufcu = bufpp[:,:ncore[0],ncore[0]:nocc[0]]
+            bufcp = bufpp[:,:ncore[0],:]
+            bufvu = bufpp[:,ncore[0]:,ncore[0]:nocc[0]]
+            self.Iapcv += np.einsum('kup,kiv->upiv',
+                                        bufap, bufcv) * 2
+            self.Iapcv -= np.einsum('kpv,kiu->upiv',
+                                        bufpv, bufcu)
+            self.Iapcv -= np.einsum('kip,kvu->upiv',
+                                        bufcp, bufvu)
+
+            bufPV = bufPP[:,:,ncore[1]:]
+            bufCU = bufPP[:,:ncore[1],ncore[1]:nocc[1]]
+            bufCP = bufPP[:,:ncore[1],:]
+            bufVU = bufPP[:,ncore[1]:,ncore[1]:nocc[1]]
+            self.IAPCV += np.einsum('kup,kiv->upiv',
+                                        bufAP, bufCV) * 2
+            self.IAPCV -= np.einsum('kpv,kiu->upiv',
+                                        bufPV, bufCU)
+            self.IAPCV -= np.einsum('kip,kvu->upiv',
+                                        bufCP, bufVU)
+
+            self.apCV += np.einsum('kup,kiv->upiv', bufap, bufCV)
+            self.APcv += np.einsum('kup,kiv->upiv', bufAP, bufcv)
+            t1 = log.timer_debug1('DF-UCASSCF integral transformation', *t1)
+
+        self.vhf_c = (np.einsum('ipq->pq', self.jkcpp) + self.jC_pp,
+                      np.einsum('ipq->pq', self.jkcPP) + self.jc_PP)
+        log.timer('DF-UCASSCF integral transformation', *t0)
 
 
 class _ERIS:
@@ -384,15 +533,15 @@ class _ERIS:
         self.feri = lib.H5TmpFile()
         self.ppaa = self.feri.create_dataset('ppaa', (nmo,nmo,ncas,ncas), 'f8')
         self.papa = self.feri.create_dataset('papa', (nmo,ncas,nmo,ncas), 'f8')
-        self.j_pc = numpy.zeros((nmo,ncore))
-        k_cp = numpy.zeros((ncore,nmo))
+        self.j_pc = np.zeros((nmo,ncore))
+        k_cp = np.zeros((ncore,nmo))
 
-        mo = numpy.asarray(mo, order='F')
+        mo = np.asarray(mo, order='F')
         fxpp = lib.H5TmpFile()
 
         blksize = max(4, int(min(with_df.blockdim, (max_memory*.95e6/8-naoaux*nmo*ncas)/3/nmo**2)))
-        bufpa = numpy.empty((naoaux,nmo,ncas))
-        bufs1 = numpy.empty((blksize,nmo,nmo))
+        bufpa = np.empty((naoaux,nmo,ncas))
+        bufs1 = np.empty((blksize,nmo,nmo))
         fmmm = _ao2mo.libao2mo.AO2MOmmm_nr_s2_iltj
         fdrv = _ao2mo.libao2mo.AO2MOnr_e2_drv
         ftrans = _ao2mo.libao2mo.AO2MOtranse2_nr_s2
@@ -411,9 +560,9 @@ class _ERIS:
             fxpp_keys.append([str(k), b0, b0+naux])
             fxpp[str(k)] = bufpp.transpose(1,2,0)
             bufpa[b0:b0+naux] = bufpp[:,:,ncore:nocc]
-            bufd = numpy.einsum('kii->ki', bufpp)
-            self.j_pc += numpy.einsum('ki,kj->ij', bufd, bufd[:,:ncore])
-            k_cp += numpy.einsum('kij,kij->ij', bufpp[:,:ncore], bufpp[:,:ncore])
+            bufd = np.einsum('kii->ki', bufpp)
+            self.j_pc += np.einsum('ki,kj->ij', bufd, bufd[:,:ncore])
+            k_cp += np.einsum('kij,kij->ij', bufpp[:,:ncore], bufpp[:,:ncore])
             b0 += naux
             t1 = log.timer_debug1('j_pc and k_pc', *t1)
         self.k_pc = k_cp.T.copy()
@@ -422,10 +571,10 @@ class _ERIS:
 
         mem_now = lib.current_memory()[0]
         nblk = int(max(8, min(nmo, ((max_memory-mem_now)*1e6/8-bufpa.size)/(ncas**2*nmo))))
-        bufs1 = numpy.empty((nblk,ncas,nmo,ncas))
-        dgemm = lib.numpy_helper._dgemm
+        bufs1 = np.empty((nblk,ncas,nmo,ncas))
+        dgemm = lib.np_helper._dgemm
         for p0, p1 in prange(0, nmo, nblk):
-            #tmp = numpy.dot(bufpa[:,p0:p1].reshape(naoaux,-1).T,
+            #tmp = np.dot(bufpa[:,p0:p1].reshape(naoaux,-1).T,
             #                bufpa.reshape(naoaux,-1))
             tmp = bufs1[:p1-p0]
             dgemm('T', 'N', (p1-p0)*ncas, nmo*ncas, naoaux,
@@ -438,8 +587,8 @@ class _ERIS:
 
         mem_now = lib.current_memory()[0]
         nblk = int(max(8, min(nmo, (max_memory-mem_now)*1e6/8/(nmo*naoaux+ncas**2*nmo))))
-        bufs1 = numpy.empty((nblk,nmo,naoaux))
-        bufs2 = numpy.empty((nblk,nmo,ncas,ncas))
+        bufs1 = np.empty((nblk,nmo,naoaux))
+        bufs2 = np.empty((nblk,nmo,ncas,ncas))
         for p0, p1 in prange(0, nmo, nblk):
             nrow = p1 - p0
             buf = bufs1[:nrow]
@@ -453,9 +602,9 @@ class _ERIS:
 
         self.feri.flush()
 
-        dm_core = numpy.dot(mo[:,:ncore], mo[:,:ncore].T)
+        dm_core = np.dot(mo[:,:ncore], mo[:,:ncore].T)
         vj, vk = casscf.get_jk(mol, dm_core)
-        self.vhf_c = reduce(numpy.dot, (mo.T, vj*2-vk, mo))
+        self.vhf_c = reduce(np.dot, (mo.T, vj*2-vk, mo))
         t0 = log.timer('density fitting ao2mo', *t0)
 
 def _mem_usage(ncore, ncas, nmo):
