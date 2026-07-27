@@ -539,7 +539,7 @@ class _ERIS:
         mem_now = lib.current_memory()[0]
         nblk = int(max(8, min(nmo, ((max_memory-mem_now)*1e6/8-bufpa.size)/(ncas**2*nmo))))
         bufs1 = np.empty((nblk,ncas,nmo,ncas))
-        dgemm = lib.np_helper._dgemm
+        dgemm = lib.numpy_helper._dgemm
         for p0, p1 in prange(0, nmo, nblk):
             #tmp = np.dot(bufpa[:,p0:p1].reshape(naoaux,-1).T,
             #                bufpa.reshape(naoaux,-1))
