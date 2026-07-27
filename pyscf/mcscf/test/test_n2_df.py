@@ -81,7 +81,7 @@ class KnownValues(unittest.TestCase):
         mc_ref = mcscf.UCASCI(mf_ref, 2, (2,1), ncore=(3,3))
         e_ref = mc_ref.kernel()[0]
 
-        # The energy computed from DFUCASCI and UCASCI should be the 
+        # The energy computed from DFUCASCI and UCASCI should be the
         # same within numerical precision as the complete ERIs were
         # reconstructed from the density fitting intermediates.
         self.assertAlmostEqual(e_df, e_ref, 10)
@@ -135,7 +135,7 @@ class KnownValues(unittest.TestCase):
         nmo = mf.mo_coeff[0].shape[1]
         r = numpy.arange(2*nmo**2, dtype=float).reshape(2,nmo,nmo)
         r = (r[0]-r[0].T, r[1]-r[1].T)
-        
+
         # Creating a dummy 1-RDMs for casdm1s.
         casdm1s = (numpy.asarray(((.8,.1),(.1,.2))),
                    numpy.asarray(((.6,.2),(.2,.4))))
