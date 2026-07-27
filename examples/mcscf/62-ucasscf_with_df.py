@@ -5,6 +5,7 @@
 import time
 
 from pyscf import gto, scf, mcscf
+from pyscf.mcscf import avas
 
 '''
 Compare UCASSCF with and without density fitting (DF)
@@ -21,14 +22,18 @@ mol.build()
 mf = scf.UHF(mol)
 print('E(UHF) = %.15g' % mf.kernel())
 
+ncas, nelecas, mo = avas.uavas(mf, ['O 2px', 'O 2py'])
+mo_df = (mo[0].copy(), mo[1].copy())
+print('UAVAS active space: CAS(%d, %d)' % (sum(nelecas), ncas))
+
 t0 = time.perf_counter()
-mc = mcscf.UCASSCF(mf, 4, (4,2))
-emc = mc.kernel()[0]
+mc = mcscf.UCASSCF(mf, ncas, nelecas)
+emc = mc.kernel(mo)[0]
 t_ucasscf = time.perf_counter() - t0
 
 t0 = time.perf_counter()
-mc_df = mcscf.UCASSCF(mf, 4, (4,2)).density_fit()
-emc_df = mc_df.kernel()[0]
+mc_df = mcscf.UCASSCF(mf, ncas, nelecas).density_fit()
+emc_df = mc_df.kernel(mo_df)[0]
 t_dfucasscf = time.perf_counter() - t0
 
 print('\nUCASSCF comparison')
