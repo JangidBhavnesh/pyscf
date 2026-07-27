@@ -24,6 +24,8 @@ from pyscf import lib
 from pyscf.lib import logger
 from pyscf.ao2mo import _ao2mo
 from pyscf.mcscf.casci import CASCI
+from pyscf.mcscf.ucasci import UCASCI
+from pyscf.mcscf.umc1step import UCASSCF
 from pyscf import df
 
 
@@ -78,7 +80,11 @@ def density_fit(casscf, auxbasis=None, with_df=None):
             casscf.with_df = with_df
         return casscf
 
-    if isinstance(casscf, CASCI):
+    if isinstance(casscf, UCASCI):
+        cls = _DFUCASCI
+    elif isinstance(casscf, UCASSCF):
+        cls = _DFUCASSCF
+    elif isinstance(casscf, CASCI):
         cls = _DFCASCI
     else:
         cls = _DFCASSCF
@@ -96,7 +102,7 @@ class _DFCAS:
         self.with_df = with_df
 
     def undo_df(self):
-        '''Remove the DFCASCI/DFCASSCF Mixin'''
+        '''Remove the density fitting mixin'''
         obj = lib.view(self, lib.drop_class(self.__class__, _DFCAS))
         del obj.with_df
         return obj
@@ -146,6 +152,27 @@ class _DFCAS:
         raise NotImplementedError
 
     def _state_average_nuc_grad_method (self, state=None):
+        raise NotImplementedError
+
+class _DFUCAS(_DFCAS):
+    def dump_flags(self, verbose=None):
+        super(_DFCAS, self).dump_flags(verbose)
+        logger.info(self, 'DFUCASCI/DFUCASSCF: density fitting for JK matrix '
+                    'and 2e integral transformation')
+        return self
+
+    def get_veff(self, mol=None, dm=None, hermi=1):
+        if dm is None:
+            mocore = (self.mo_coeff[0][:,:self.ncore[0]],
+                      self.mo_coeff[1][:,:self.ncore[1]])
+            dm = (numpy.dot(mocore[0], mocore[0].T),
+                  numpy.dot(mocore[1], mocore[1].T))
+        vj, vk = self.get_jk(mol, dm, hermi)
+        return vj[0] + vj[1] - vk
+
+    # _exact_paaa is only used by restricted CASSCF and is not called by
+    # UCASCI or UCASSCF.
+    def _exact_paaa(self, mo, u, out=None):
         raise NotImplementedError
 
 class _DFCASCI(_DFCAS):
