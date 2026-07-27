@@ -252,3 +252,144 @@ class AVAS(lib.StreamObject):
         self.ncas, self.nelecas, self.mo_coeff, \
                 self.occ_weights, self.vir_weights = _kernel(self)
         return self.ncas, self.nelecas, self.mo_coeff
+
+
+def _uhf_spin_avas(avas_obj, spin):
+    mf = avas_obj._scf
+    mf1 = scf.RHF(mf.mol)
+    mf1.mo_coeff = mf.mo_coeff[spin]
+    mf1.mo_occ = mf.mo_occ[spin]
+    mf1.mo_energy = mf.mo_energy[spin]
+
+    avas1 = AVAS(mf1, avas_obj.aolabels, avas_obj.threshold,
+                 avas_obj.minao, avas_obj.with_iao,
+                 avas_obj.openshell_option, False, avas_obj.ncore,
+                 avas_obj.verbose)
+    ncas, nelecas, mo, occ_weights, vir_weights = _kernel(avas1)
+
+    ncore = avas_obj.ncore
+    nocc = numpy.count_nonzero(mf1.mo_occ != 0)
+    ncas_occ = numpy.count_nonzero(occ_weights >= avas_obj.threshold)
+    ncas_vir = ncas - ncas_occ
+    ncore_avas = nocc - ncore - ncas_occ
+
+    i = ncore
+    mofreeze = mo[:,:i]
+    mocore = mo[:,i:i+ncore_avas]
+    i += ncore_avas
+    mocas_occ = mo[:,i:i+ncas_occ]
+    i += ncas_occ
+    mocas_vir = mo[:,i:i+ncas_vir]
+    i += ncas_vir
+    movir = mo[:,i:]
+    return (mofreeze, mocore, mocas_occ, mocas_vir, movir,
+            occ_weights, vir_weights, nocc)
+
+
+def _ukernel(avas_obj):
+    mf = avas_obj._scf
+    if not isinstance(mf, scf.uhf.UHF):
+        raise TypeError('UAVAS requires a UHF object')
+    if not isinstance(avas_obj.ncore, (int, numpy.integer)):
+        raise TypeError('UAVAS ncore must be an integer')
+
+    log = logger.new_logger(avas_obj)
+    log.info('\n** UHF AVAS **')
+    data = [_uhf_spin_avas(avas_obj, spin) for spin in range(2)]
+
+    blocks = [list(x[:5]) for x in data]
+    occ_weights = [x[5] for x in data]
+    vir_weights = [x[6] for x in data]
+    nocc = [x[7] for x in data]
+
+    # UCAS requires the inactive alpha and beta spaces to have the same size
+    # when ncore is not explicitly supplied to the solver.  Keep every
+    # threshold-selected orbital and promote the best remaining occupied MOs.
+    ncore = [avas_obj.ncore + x[1].shape[1] for x in blocks]
+    target_ncore = min(ncore)
+    for spin in range(2):
+        nmove = ncore[spin] - target_ncore
+        if nmove:
+            if blocks[spin][1].shape[1] < nmove:
+                raise RuntimeError('Not enough occupied orbitals for UHF AVAS')
+            blocks[spin][2] = numpy.hstack(
+                (blocks[spin][2], blocks[spin][1][:,-nmove:]))
+            blocks[spin][1] = blocks[spin][1][:,:-nmove]
+
+            nactive = blocks[spin][2].shape[1] - nmove
+            ninactive = occ_weights[spin].size - nactive
+            inactive = occ_weights[spin][:ninactive]
+            active = occ_weights[spin][ninactive:]
+            occ_weights[spin] = numpy.hstack(
+                (inactive[:-nmove], active, inactive[-nmove:]))
+
+    # Alpha and beta UCAS orbital sets must contain the same number of active
+    # orbitals.  Pad the smaller set with the largest remaining virtual weight.
+    ncas = [x[2].shape[1] + x[3].shape[1] for x in blocks]
+    target_ncas = max(ncas)
+    for spin in range(2):
+        nmove = target_ncas - ncas[spin]
+        if nmove:
+            if blocks[spin][4].shape[1] < nmove:
+                raise RuntimeError('Not enough virtual orbitals for UHF AVAS')
+            blocks[spin][3] = numpy.hstack(
+                (blocks[spin][3], blocks[spin][4][:,-nmove:]))
+            blocks[spin][4] = blocks[spin][4][:,:-nmove]
+
+            nactive = blocks[spin][3].shape[1] - nmove
+            active = vir_weights[spin][:nactive]
+            inactive = vir_weights[spin][nactive:]
+            vir_weights[spin] = numpy.hstack(
+                (active, inactive[-nmove:], inactive[:-nmove]))
+
+    if avas_obj.canonicalize:
+        from pyscf.mcscf import dmet_cas
+        ovlp = mf.mol.intor_symmetric('int1e_ovlp')
+
+        def trans(c, spin):
+            if c.shape[1] == 0:
+                return c
+            mo_coeff = mf.mo_coeff[spin]
+            mo_energy = mf.mo_energy[spin]
+            csc = reduce(numpy.dot, (c.T, ovlp, mo_coeff))
+            fock = numpy.dot(csc*mo_energy, csc.T)
+            e, u = scipy.linalg.eigh(fock)
+            return dmet_cas.symmetrize(
+                mf.mol, e, numpy.dot(c, u), ovlp, log)
+
+        for spin in range(2):
+            if avas_obj.ncore > 0:
+                blocks[spin][0] = trans(blocks[spin][0], spin)
+            blocks[spin][1] = trans(blocks[spin][1], spin)
+            mocas = numpy.hstack((blocks[spin][2], blocks[spin][3]))
+            blocks[spin][2] = trans(mocas, spin)
+            blocks[spin][3] = blocks[spin][3][:,:0]
+            blocks[spin][4] = trans(blocks[spin][4], spin)
+
+    mo = tuple(numpy.hstack(x) for x in blocks)
+    nelecas = (nocc[0] - target_ncore, nocc[1] - target_ncore)
+    log.info('UHF active space ((%de+%de), %do)',
+             nelecas[0], nelecas[1], target_ncas)
+    return (target_ncas, nelecas, mo,
+            tuple(occ_weights), tuple(vir_weights))
+
+
+def ukernel(mf, aolabels, threshold=THRESHOLD, minao=MINAO,
+            with_iao=WITH_IAO, openshell_option=OPENSHELL_OPTION,
+            canonicalize=CANONICALIZE, ncore=0, verbose=None):
+    '''UHF AVAS method to construct an initial orbital guess for UCAS.'''
+    avas_obj = UAVAS(mf, aolabels, threshold, minao, with_iao,
+                     openshell_option, canonicalize, ncore, verbose)
+    return avas_obj.kernel()
+
+
+uavas = ukernel
+
+
+@lib.with_doc(ukernel.__doc__)
+class UAVAS(AVAS):
+    def kernel(self):
+        self.dump_flags()
+        self.ncas, self.nelecas, self.mo_coeff, \
+                self.occ_weights, self.vir_weights = _ukernel(self)
+        return self.ncas, self.nelecas, self.mo_coeff
