@@ -189,6 +189,9 @@ class _DFCASCI(_DFCAS):
             return super(_DFCAS, self).get_h2eff(mo_coeff)
 
 class _DFUCASCI(_DFUCAS):
+    def nuc_grad_method(self):
+        return UCASCI.nuc_grad_method(self)
+
     def get_h2eff(self, mo_coeff=None):
         if self.with_df:
             ncore = self.ncore
