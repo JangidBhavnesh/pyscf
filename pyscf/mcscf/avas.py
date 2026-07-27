@@ -265,7 +265,7 @@ def _uhf_spin_avas(avas_obj, spin):
                  avas_obj.minao, avas_obj.with_iao,
                  avas_obj.openshell_option, False, avas_obj.ncore,
                  avas_obj.verbose)
-    ncas, nelecas, mo, occ_weights, vir_weights = _kernel(avas1)
+    ncas, _, mo, occ_weights, vir_weights = _kernel(avas1)
 
     ncore = avas_obj.ncore
     nocc = numpy.count_nonzero(mf1.mo_occ != 0)
