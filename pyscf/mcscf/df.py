@@ -188,6 +188,32 @@ class _DFCASCI(_DFCAS):
         else:
             return super(_DFCAS, self).get_h2eff(mo_coeff)
 
+class _DFUCASCI(_DFUCAS):
+    def get_h2eff(self, mo_coeff=None):
+        if self.with_df:
+            ncore = self.ncore
+            nocc = (ncore[0] + self.ncas, ncore[1] + self.ncas)
+            if mo_coeff is None:
+                mo_coeff = (self.mo_coeff[0][:,ncore[0]:nocc[0]],
+                            self.mo_coeff[1][:,ncore[1]:nocc[1]])
+            elif (mo_coeff[0].shape[1] != self.ncas or
+                  mo_coeff[1].shape[1] != self.ncas):
+                mo_coeff = (mo_coeff[0][:,ncore[0]:nocc[0]],
+                            mo_coeff[1][:,ncore[1]:nocc[1]])
+
+            ncas = self.ncas
+            eri_aa = self.with_df.ao2mo(mo_coeff[0], compact=False)
+            eri_ab = self.with_df.ao2mo((mo_coeff[0], mo_coeff[0],
+                                        mo_coeff[1], mo_coeff[1]),
+                                       compact=False)
+            eri_bb = self.with_df.ao2mo(mo_coeff[1], compact=False)
+            eri_aa = eri_aa.reshape(ncas,ncas,ncas,ncas)
+            eri_ab = eri_ab.reshape(ncas,ncas,ncas,ncas)
+            eri_bb = eri_bb.reshape(ncas,ncas,ncas,ncas)
+            return (eri_aa, eri_ab, eri_bb)
+        else:
+            return super(_DFCAS, self).get_h2eff(mo_coeff)
+
 class _DFCASSCF(_DFCAS):
     get_h2eff = _DFCASCI.get_h2eff
 
@@ -205,6 +231,16 @@ class _DFCASSCF(_DFCAS):
     def _state_average_nuc_grad_method (self, state=None):
         from pyscf.df.grad import sacasscf
         return sacasscf.Gradients (self, state=state)
+
+class _DFUCASSCF(_DFUCAS):
+    get_h2eff = _DFUCASCI.get_h2eff
+
+    def ao2mo(self, mo_coeff=None):
+        if mo_coeff is None: mo_coeff = self.mo_coeff
+        if self.with_df:
+            return _DFUERIS(self, mo_coeff, self.with_df)
+        else:
+            return super(_DFCAS, self).ao2mo(mo_coeff)
 
 
 def approx_hessian(casscf, auxbasis=None, with_df=None):
