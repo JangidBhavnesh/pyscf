@@ -55,21 +55,46 @@ def gen_g_hop(casscf, mo, u, casdm1s, casdm2s, eris):
 
     # part2, part3
     vhf_c = eris.vhf_c
-    vhf_ca = ((vhf_c[0] +
-               numpy.einsum('uvpq,uv->pq', eris.aapp, casdm1s[0]) -
-               numpy.einsum('upqv,uv->pq', eris.appa, casdm1s[0]) +
-               numpy.einsum('uvpq,uv->pq', eris.AApp, casdm1s[1])),
-              (vhf_c[1] +
-               numpy.einsum('uvpq,uv->pq', eris.aaPP, casdm1s[0]) +
-               numpy.einsum('uvpq,uv->pq', eris.AAPP, casdm1s[1]) -
-               numpy.einsum('upqv,uv->pq', eris.APPA, casdm1s[1])),)
+    # vhf_ca = ((vhf_c[0] +
+    #            numpy.einsum('uvpq,uv->pq', eris.aapp, casdm1s[0]) -
+    #            numpy.einsum('upqv,uv->pq', eris.appa, casdm1s[0]) +
+    #            numpy.einsum('uvpq,uv->pq', eris.AApp, casdm1s[1])),
+    #           (vhf_c[1] +
+    #            numpy.einsum('uvpq,uv->pq', eris.aaPP, casdm1s[0]) +
+    #            numpy.einsum('uvpq,uv->pq', eris.AAPP, casdm1s[1]) -
+    #            numpy.einsum('upqv,uv->pq', eris.APPA, casdm1s[1])),)
+
+    vhf_ca = [vhf_c[0].copy(), vhf_c[1].copy()]
+    vhf_ca[0] += numpy.tensordot(casdm1s[0], eris.aapp, axes=2)
+    vhf_ca[0] -= numpy.tensordot(casdm1s[0], eris.appa,
+                                 axes=((0,1), (0,3)))
+    vhf_ca[0] += numpy.tensordot(casdm1s[1], eris.AApp, axes=2)
+    vhf_ca[1] += numpy.tensordot(casdm1s[0], eris.aaPP, axes=2)
+    vhf_ca[1] += numpy.tensordot(casdm1s[1], eris.AAPP, axes=2)
+    vhf_ca[1] -= numpy.tensordot(casdm1s[1], eris.APPA,
+                                 axes=((0,1), (0,3)))
+
+    # hdm2 = [(numpy.einsum('tuvw,vwpq->tupq', casdm2s[0], eris.aapp) +
+    #         numpy.einsum('tuvw,vwpq->tupq', casdm2s[1], eris.AApp)),
+    #     (numpy.einsum('vwtu,vwpq->tupq', casdm2s[1], eris.aaPP) +
+    #         numpy.einsum('tuvw,vwpq->tupq', casdm2s[2], eris.AAPP))]
+
+    ncas2 = ncas**2
+    nmo2 = nmo**2
+    dm2aa = casdm2s[0].reshape(ncas2,ncas2)
+    dm2ab = casdm2s[1].reshape(ncas2,ncas2)
+    dm2bb = casdm2s[2].reshape(ncas2,ncas2)
+    hdm2a = numpy.dot(dm2aa, eris.aapp.reshape(ncas2,nmo2))
+    hdm2a += numpy.dot(dm2ab, eris.AApp.reshape(ncas2,nmo2))
+    hdm2b = numpy.dot(dm2ab.T, eris.aaPP.reshape(ncas2,nmo2))
+    hdm2b += numpy.dot(dm2bb, eris.AAPP.reshape(ncas2,nmo2))
+    hdm2 = [hdm2a.reshape(ncas,ncas,nmo,nmo),
+            hdm2b.reshape(ncas,ncas,nmo,nmo)]
+
+    # Free up memory
+    dm2aa = dm2bb = dm2ab = hdm2a = hdm2b = None
 
     ################# gradient #################
-    hdm2 = [(numpy.einsum('tuvw,vwpq->tupq', casdm2s[0], eris.aapp) +
-             numpy.einsum('tuvw,vwpq->tupq', casdm2s[1], eris.AApp)),
-            (numpy.einsum('vwtu,vwpq->tupq', casdm2s[1], eris.aaPP) +
-             numpy.einsum('tuvw,vwpq->tupq', casdm2s[2], eris.AAPP))]
-
     hcore = casscf.get_hcore()
     h1e_mo = (reduce(numpy.dot, (mo[0].T, hcore[0], mo[0])),
               reduce(numpy.dot, (mo[1].T, hcore[1], mo[1])))
@@ -599,6 +624,44 @@ class UCASSCF(ucasci.UCASBase):
         ncore = self.ncore
         nocc = (ncas + ncore[0], ncas + ncore[1])
         ra, rb = r
+
+        response_eris = ('Icvcv', 'ICVCV', 'cvCV', 'Iapcv',
+                         'IAPCV', 'apCV', 'APcv')
+        has_response_eris = all(hasattr(eris, key) for key in response_eris)
+        if not has_response_eris:
+            dm3 = []
+            dm4 = []
+            for m, rm in enumerate((ra, rb)):
+                dm3m = reduce(numpy.dot, (mo[m][:,:ncore[m]],
+                                          rm[:ncore[m],ncore[m]:],
+                                          mo[m][:,ncore[m]:].T))
+                dm3.append(dm3m + dm3m.T)
+
+                dm4m = numpy.dot(casdm1s[m], rm[ncore[m]:nocc[m]])
+                dm4m = reduce(numpy.dot,
+                              (mo[m][:,ncore[m]:nocc[m]], dm4m, mo[m].T))
+                dm4.append(dm4m + dm4m.T)
+
+            dms = numpy.asarray((dm3[0], dm3[1],
+                                 dm3[0]+dm4[0], dm3[1]+dm4[1]))
+            vj, vk = self.get_jk(self.mol, dms)
+            vhf3 = (vj[0]+vj[1]-vk[0], vj[0]+vj[1]-vk[1])
+            vhf4 = (vj[2]+vj[3]-vk[2], vj[2]+vj[3]-vk[3])
+
+            va = (reduce(numpy.dot,
+                         (casdm1s[0],
+                          mo[0][:,ncore[0]:nocc[0]].T, vhf3[0], mo[0])),
+                  reduce(numpy.dot,
+                         (casdm1s[1],
+                          mo[1][:,ncore[1]:nocc[1]].T, vhf3[1], mo[1])))
+            vc = (reduce(numpy.dot,
+                         (mo[0][:,:ncore[0]].T, vhf4[0],
+                          mo[0][:,ncore[0]:])),
+                  reduce(numpy.dot,
+                         (mo[1][:,:ncore[1]].T, vhf4[1],
+                          mo[1][:,ncore[1]:])))
+            return va, vc
+
         vhf3ca = numpy.einsum('srqp,sr->qp', eris.Icvcv, ra[:ncore[0],ncore[0]:])
         vhf3ca += numpy.einsum('qpsr,sr->qp', eris.cvCV, rb[:ncore[1],ncore[1]:]) * 2
         vhf3cb = numpy.einsum('srqp,sr->qp', eris.ICVCV, rb[:ncore[1],ncore[1]:])
