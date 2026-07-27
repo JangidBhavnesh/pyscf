@@ -60,6 +60,31 @@ def tearDownModule():
 
 
 class KnownValues(unittest.TestCase):
+    def test_ucasscf_df(self):
+        from pyscf.mcscf import df as mc_df
+
+        mol1 = gto.M(
+            atom = 'O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587',
+            basis = 'sto-3g',
+            charge = 1,
+            spin = 1,
+            verbose = 0,
+        )
+        mf = scf.UHF(mol1).run(conv_tol=1e-12)
+        mc = mcscf.UCASSCF(mf, 2, (2,1), ncore=(3,3)).density_fit()
+        # API Check
+        self.assertTrue(isinstance(mc, mc_df._DFUCASSCF))
+        e_df = mc.kernel()[0]
+
+        mf_ref = mf.copy()
+        mf_ref._eri = mc.with_df.get_eri()
+        mc_ref = mcscf.UCASSCF(mf_ref, 2, (2,1), ncore=(3,3))
+        e_ref = mc_ref.kernel()[0]
+
+        self.assertTrue(mc.converged)
+        self.assertTrue(mc_ref.converged)
+        self.assertAlmostEqual(e_df, e_ref, 10)
+
     def test_mc1step_4o4e(self):
         mc = mcscf.approx_hessian(mcscf.CASSCF(m, 4, 4), auxbasis='weigend')
         emc = mc.mc1step()[0]
