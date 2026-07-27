@@ -60,6 +60,32 @@ def tearDownModule():
 
 
 class KnownValues(unittest.TestCase):
+    def test_ucasci_df(self):
+        from pyscf.mcscf import df as mc_df
+
+        mol1 = gto.M(
+            atom = 'O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587',
+            basis = 'sto-3g',
+            charge = 1,
+            spin = 1,
+            verbose = 0,
+        )
+        mf = scf.UHF(mol1).run(conv_tol=1e-12)
+        mc = mcscf.UCASCI(mf, 2, (2,1), ncore=(3,3)).density_fit()
+        # API Check
+        self.assertTrue(isinstance(mc, mc_df._DFUCASCI))
+        e_df = mc.kernel()[0]
+
+        mf_ref = mf.copy()
+        mf_ref._eri = mc.with_df.get_eri()
+        mc_ref = mcscf.UCASCI(mf_ref, 2, (2,1), ncore=(3,3))
+        e_ref = mc_ref.kernel()[0]
+
+        # The energy computed from DFUCASCI and UCASCI should be the 
+        # same within numerical precision as the complete ERIs were
+        # reconstructed from the density fitting intermediates.
+        self.assertAlmostEqual(e_df, e_ref, 10)
+
     def test_ucasscf_df(self):
         from pyscf.mcscf import df as mc_df
 
@@ -84,6 +110,44 @@ class KnownValues(unittest.TestCase):
         self.assertTrue(mc.converged)
         self.assertTrue(mc_ref.converged)
         self.assertAlmostEqual(e_df, e_ref, 10)
+
+    def test_ucasscf_df_update_jk_in_ah(self):
+        mol1 = gto.M(
+            atom = 'H 0 0 0; H 0 0 1; H 0 1 0',
+            basis = 'sto-3g',
+            spin = 1,
+            verbose = 0,
+        )
+        mf = scf.UHF(mol1).run(conv_tol=1e-12)
+        mc = mcscf.UCASSCF(mf, 2, (1,1), ncore=(1,0)).density_fit()
+        eris = mc.ao2mo()
+
+        # Making sure that the response ERIs are not present in the eris object.
+        response_eris = ('Icvcv', 'ICVCV', 'cvCV', 'Iapcv',
+                         'IAPCV', 'apCV', 'APcv')
+        self.assertFalse(any(hasattr(eris, key) for key in response_eris))
+
+        mf_ref = mf.copy()
+        mf_ref._eri = mc.with_df.get_eri()
+        mc_ref = mcscf.UCASSCF(mf_ref, 2, (1,1), ncore=(1,0))
+        eris_ref = mc_ref.ao2mo()
+
+        nmo = mf.mo_coeff[0].shape[1]
+        r = numpy.arange(2*nmo**2, dtype=float).reshape(2,nmo,nmo)
+        r = (r[0]-r[0].T, r[1]-r[1].T)
+        
+        # Creating a dummy 1-RDMs for casdm1s.
+        casdm1s = (numpy.asarray(((.8,.1),(.1,.2))),
+                   numpy.asarray(((.6,.2),(.2,.4))))
+        va, vc = mc.update_jk_in_ah(mc.mo_coeff, r, casdm1s, eris)
+        va_ref, vc_ref = mc_ref.update_jk_in_ah(
+            mc_ref.mo_coeff, r, casdm1s, eris_ref)
+
+        self.assertAlmostEqual(abs(va[0]-va_ref[0]).max(), 0, 12)
+        self.assertAlmostEqual(abs(va[1]-va_ref[1]).max(), 0, 12)
+        self.assertAlmostEqual(abs(vc[0]-vc_ref[0]).max(), 0, 12)
+        self.assertEqual(vc[1].size, 0)
+        self.assertEqual(vc_ref[1].size, 0)
 
     def test_mc1step_4o4e(self):
         mc = mcscf.approx_hessian(mcscf.CASSCF(m, 4, 4), auxbasis='weigend')
