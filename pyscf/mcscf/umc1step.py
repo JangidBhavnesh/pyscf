@@ -91,9 +91,6 @@ def gen_g_hop(casscf, mo, u, casdm1s, casdm2s, eris):
     hdm2 = [hdm2a.reshape(ncas,ncas,nmo,nmo),
             hdm2b.reshape(ncas,ncas,nmo,nmo)]
 
-    # Free up memory
-    dm2aa = dm2bb = dm2ab = hdm2a = hdm2b = None
-
     ################# gradient #################
     hcore = casscf.get_hcore()
     h1e_mo = (reduce(numpy.dot, (mo[0].T, hcore[0], mo[0])),

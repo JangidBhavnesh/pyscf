@@ -361,12 +361,7 @@ class _DFHessianCASSCF:
             return super().get_jk(mol, dm, hermi,
                                   with_j=with_j, with_k=with_k, omega=omega)
 
-'''
-Note: Currently, I am generating all the cvcv type of integrals required for
-the orbital hessian. This is not memory efficient and can be improved in the future.
-Like it is done in RCASSCF, the cvcv type integrals can be generated from respective
-jk calls.
-'''
+# Orbital-response integrals are generated through JK calls in update_jk_in_ah.
 class _DFUERIS:
     def __init__(self, casscf, mo, with_df):
         log = logger.Logger(casscf.stdout, casscf.verbose)
@@ -375,7 +370,6 @@ class _DFUERIS:
         ncore = self.ncore = casscf.ncore
         ncas = self.ncas = casscf.ncas
         nocc = (ncore[0] + ncas, ncore[1] + ncas)
-        nvir = (nmo - ncore[0], nmo - ncore[1])
 
         # Memory estimation for DF-UCASSCF integral transformation
         mem_eris, mem_work = _mem_usage_uhf(ncore, ncas, nmo)
@@ -409,14 +403,6 @@ class _DFUERIS:
         self.appa = np.zeros((ncas,nmo,nmo,ncas))
         self.apPA = np.zeros((ncas,nmo,nmo,ncas))
         self.APPA = np.zeros((ncas,nmo,nmo,ncas))
-
-        self.Iapcv = np.zeros((ncas,nmo,ncore[0],nvir[0]))
-        self.IAPCV = np.zeros((ncas,nmo,ncore[1],nvir[1]))
-        self.apCV = np.zeros((ncas,nmo,ncore[1],nvir[1]))
-        self.APcv = np.zeros((ncas,nmo,ncore[0],nvir[0]))
-        self.Icvcv = np.zeros((ncore[0],nvir[0],ncore[0],nvir[0]))
-        self.ICVCV = np.zeros((ncore[1],nvir[1],ncore[1],nvir[1]))
-        self.cvCV = np.zeros((ncore[0],nvir[0],ncore[1],nvir[1]))
 
         mo = (np.asarray(mo[0], order='F'),
               np.asarray(mo[1], order='F'))
@@ -478,53 +464,6 @@ class _DFUERIS:
             self.appa += np.einsum('kup,kqv->upqv', bufap, bufpa)
             self.apPA += np.einsum('kup,kqv->upqv', bufap, bufPA)
             self.APPA += np.einsum('kup,kqv->upqv', bufAP, bufPA)
-
-            bufcv = bufpp[:,:ncore[0],ncore[0]:]
-            bufCV = bufPP[:,:ncore[1],ncore[1]:]
-            self.cvCV += np.einsum('kiv,kjw->ivjw', bufcv, bufCV)
-
-            bufcc = bufpp[:,:ncore[0],:ncore[0]]
-            bufvv = bufpp[:,ncore[0]:,ncore[0]:]
-            self.Icvcv += np.einsum('kiv,kjw->ivjw',
-                                        bufcv, bufcv) * 2
-            self.Icvcv -= np.einsum('kij,kvw->ivjw',
-                                        bufcc, bufvv)
-            self.Icvcv -= np.einsum('kiw,kjv->ivjw',
-                                        bufcv, bufcv)
-
-            bufCC = bufPP[:,:ncore[1],:ncore[1]]
-            bufVV = bufPP[:,ncore[1]:,ncore[1]:]
-            self.ICVCV += np.einsum('kiv,kjw->ivjw',
-                                        bufCV, bufCV) * 2
-            self.ICVCV -= np.einsum('kij,kvw->ivjw',
-                                        bufCC, bufVV)
-            self.ICVCV -= np.einsum('kiw,kjv->ivjw',
-                                        bufCV, bufCV)
-
-            bufpv = bufpp[:,:,ncore[0]:]
-            bufcu = bufpp[:,:ncore[0],ncore[0]:nocc[0]]
-            bufcp = bufpp[:,:ncore[0],:]
-            bufvu = bufpp[:,ncore[0]:,ncore[0]:nocc[0]]
-            self.Iapcv += np.einsum('kup,kiv->upiv',
-                                        bufap, bufcv) * 2
-            self.Iapcv -= np.einsum('kpv,kiu->upiv',
-                                        bufpv, bufcu)
-            self.Iapcv -= np.einsum('kip,kvu->upiv',
-                                        bufcp, bufvu)
-
-            bufPV = bufPP[:,:,ncore[1]:]
-            bufCU = bufPP[:,:ncore[1],ncore[1]:nocc[1]]
-            bufCP = bufPP[:,:ncore[1],:]
-            bufVU = bufPP[:,ncore[1]:,ncore[1]:nocc[1]]
-            self.IAPCV += np.einsum('kup,kiv->upiv',
-                                        bufAP, bufCV) * 2
-            self.IAPCV -= np.einsum('kpv,kiu->upiv',
-                                        bufPV, bufCU)
-            self.IAPCV -= np.einsum('kip,kvu->upiv',
-                                        bufCP, bufVU)
-
-            self.apCV += np.einsum('kup,kiv->upiv', bufap, bufCV)
-            self.APcv += np.einsum('kup,kiv->upiv', bufAP, bufcv)
             t1 = log.timer_debug1('DF-UCASSCF integral transformation', *t1)
 
         self.vhf_c = (np.einsum('ipq->pq', self.jkcpp) + self.jC_pp,
@@ -630,27 +569,15 @@ class _ERIS:
 
 def _mem_usage_uhf(ncore, ncas, nmo):
     ncore_a, ncore_b = ncore
-    nvir_a = nmo - ncore_a
-    nvir_b = nmo - ncore_b
     nmo2 = nmo**2
 
     mem_core = (ncore_a + ncore_b + 4) * nmo2
     mem_active = 7 * ncas**2 * nmo2
-    mem_response = (2*ncas*nmo*ncore_a*nvir_a +
-                    2*ncas*nmo*ncore_b*nvir_b +
-                    ncore_a**2*nvir_a**2 +
-                    ncore_b**2*nvir_b**2 +
-                    ncore_a*nvir_a*ncore_b*nvir_b)
-    mem_eris = (mem_core + mem_active + mem_response) * 8/1e6
+    mem_eris = (mem_core + mem_active) * 8/1e6
 
     max_tensor = max(ncore_a*nmo2, ncore_b*nmo2, nmo2,
-                     ncas**2*nmo2,
-                     ncas*nmo*ncore_a*nvir_a,
-                     ncas*nmo*ncore_b*nvir_b,
-                     ncore_a**2*nvir_a**2,
-                     ncore_b**2*nvir_b**2,
-                     ncore_a*nvir_a*ncore_b*nvir_b)
-    mem_work = max_tensor * 2 * 8/1e6
+                     ncas**2*nmo2)
+    mem_work = max_tensor * 8/1e6
     return mem_eris, mem_work
 
 
