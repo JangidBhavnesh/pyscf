@@ -18,6 +18,7 @@
 import numpy as np
 from scipy import linalg
 
+from pyscf import lib
 from pyscf.lib import logger
 from pyscf.fci import direct_spin1
 from pyscf import __config__
@@ -661,6 +662,139 @@ class _LPDFTMix(_LPDFT):
         raise NotImplementedError("MultiState Mix LPDFT nuclear gradients")
 
 
+class _LPDFTFCISolver(_LPDFT):
+    """Linearized PDFT for CI solvers without direct-spin CI vectors."""
+
+    @staticmethod
+    def is_direct_spin_solver(solver):
+        """Identify native direct-spin solvers, including their wrappers."""
+        for solver_class in solver.__class__.__mro__:
+            module = solver_class.__module__
+            if module.startswith("pyscf.fci.direct_spin"):
+                return True
+            if module.startswith("pyscf.fci.") and module != "pyscf.fci.addons":
+                return False
+        return False
+
+    def make_lpdft_ham_(self, mo_coeff=None, ci=None, ot=None):
+        """Compute the L-PDFT Hamiltonian from state and transition RDMs."""
+        if mo_coeff is None:
+            mo_coeff = self.mo_coeff
+        if ci is None:
+            ci = self.ci
+        if ot is None:
+            ot = self.otfnal
+
+        ot.reset(mol=self.mol)
+
+        spin = abs(self.nelecas[0] - self.nelecas[1])
+        omega, _, hyb = ot._numint.rsh_and_hybrid_coeff(ot.otxc, spin=spin)
+        if abs(omega) > 1e-11:
+            raise NotImplementedError("range-separated on-top functionals")
+        if abs(hyb[0] - hyb[1]) > 1e-11:
+            raise NotImplementedError(
+                "hybrid functionals with different exchange, correlations components"
+            )
+
+        cas_hyb = hyb[0]
+        ncas = self.ncas
+        casdm1s_0, casdm2_0 = self.get_casdm12_0(ci=ci)
+
+        self.veff1, self.veff2, E_ot = self.get_pdft_veff(
+            mo=mo_coeff,
+            ci=ci,
+            casdm1s=casdm1s_0,
+            casdm2=casdm2_0,
+            drop_mcwfn=True,
+            incl_energy=True,
+            ot=ot,
+        )
+
+        h1, h0 = self.get_h1lpdft(
+            E_ot,
+            casdm1s_0,
+            casdm2_0,
+            hyb=1.0 - cas_hyb,
+            mo_coeff=mo_coeff,
+        )
+        h2 = self.get_h2lpdft()
+
+        states = list(ci)
+        if len(states) != len(self.weights):
+            raise RuntimeError(
+                "L-PDFT requires one CI state for each state-average weight"
+            )
+        if not callable(getattr(self.fcisolver, "states_make_rdm12", None)) or not callable(
+            getattr(self.fcisolver, "states_trans_rdm12", None)
+        ):
+            raise NotImplementedError(
+                "L-PDFT requires make_rdm12 and trans_rdm12 from the CI solver"
+            )
+
+        dtype = np.result_type(h1, h2, *(np.asarray(state).dtype for state in states))
+        lpdft_ham = np.zeros((len(states), len(states)), dtype=dtype)
+        for bra in range(len(states)):
+            for ket in range(bra + 1):
+                if bra == ket:
+                    tdm1, tdm2 = self.fcisolver.states_make_rdm12(
+                        [states[bra]], ncas, self.nelecas
+                    )
+                else:
+                    tdm1, tdm2 = self.fcisolver.states_trans_rdm12(
+                        [states[bra]], [states[ket]], ncas, self.nelecas
+                    )
+                element = np.einsum("pq,pq->", h1, tdm1[0])
+                element += 0.5 * np.einsum("pqrs,pqrs->", h2, tdm2[0])
+                lpdft_ham[bra, ket] = element
+                lpdft_ham[ket, bra] = element.conjugate()
+
+        diag_idx = np.diag_indices_from(lpdft_ham)
+        lpdft_ham[diag_idx] += h0 + cas_hyb * np.asarray(self.e_mcscf)
+        return lpdft_ham
+
+    def _get_ci_adiabats(self, ci_mcscf):
+        """Transform CI states without discarding solver-specific metadata."""
+        ci_adiabats = []
+        for coeff in self.si_pdft.T:
+            ci_adiabat = coeff[0] * ci_mcscf[0]
+            for weight, ci_state in zip(coeff[1:], ci_mcscf[1:]):
+                ci_adiabat = ci_adiabat + weight * ci_state
+            ci_adiabats.append(ci_adiabat)
+        return ci_adiabats
+
+
+class _LPDFTDMRG(_LPDFTFCISolver):
+    """Linearized PDFT with a DMRG solver.
+
+    ``ci`` retains the MC-SCF DMRG state IDs.  The L-PDFT state-interaction
+    coefficients are available in ``si_pdft``, but rotated MPS wavefunctions
+    are not constructed.
+    """
+
+    def _get_ci_adiabats(self, ci_mcscf):
+        raise NotImplementedError("DMRG-LPDFT adiabatic wavefunctions")
+
+    def kernel(self, mo_coeff=None, ci0=None, ot=None, verbose=None, dump_chk=True):
+        if ci0 is None and isinstance(getattr(self, "ci", None), list):
+            ci0 = self.ci
+        with lib.temporary_env(self, _get_ci_adiabats=lambda ci_mcscf: ci_mcscf):
+            return super().kernel(
+                mo_coeff=mo_coeff,
+                ci0=ci0,
+                ot=ot,
+                verbose=verbose,
+                dump_chk=dump_chk,
+            )
+
+    def nuc_grad_method(self, state=None):
+        raise NotImplementedError("DMRG-LPDFT nuclear gradients")
+
+    Gradients = nuc_grad_method
+
+    def dip_moment(self, unit="Debye", origin="Coord_Center", state=0):
+        raise NotImplementedError("DMRG-LPDFT dipole moments")
+
+
 def linear_multi_state(mc, weights=(0.5, 0.5), **kwargs):
     """Build linearized multi-state MC-PDFT method object
 
@@ -689,8 +823,14 @@ def linear_multi_state(mc, weights=(0.5, 0.5), **kwargs):
         base_name = mc.__class__.__bases__[0].__name__
 
     mcbase_class = mc.__class__
+    if isinstance(mc.fcisolver, _dms.DMRGCI):
+        lpdft_class = _LPDFTDMRG
+    elif not _LPDFTFCISolver.is_direct_spin_solver(mc.fcisolver):
+        lpdft_class = _LPDFTFCISolver
+    else:
+        lpdft_class = _LPDFT
 
-    class LPDFT(_LPDFT, mcbase_class):
+    class LPDFT(lpdft_class, mcbase_class):
         pass
 
     LPDFT.__name__ = "LIN" + base_name
