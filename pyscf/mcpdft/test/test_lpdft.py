@@ -19,7 +19,93 @@ import h5py
 import numpy as np
 from pyscf import gto, scf, dft, fci, lib
 from pyscf import mcpdft
+from pyscf.mcpdft import _dms
+from pyscf.mcpdft import lpdft as lpdft_module
 import unittest
+
+
+class FCIAsRDM:
+    """FCI-backed solver exposing RDMs but no Hamiltonian contraction."""
+
+    spin_square = None
+    large_ci = None
+    transform_ci_for_orbital_rotation = None
+
+    def __init__(self, mol):
+        self._solver = fci.direct_spin0.FCISolver(mol)
+        self.mol = mol
+        self.stdout = mol.stdout
+        self.verbose = mol.verbose
+        self.nroots = 1
+        self.spin = 0
+        self._ci = []
+
+    def __getattr__(self, name):
+        if name in ("contract_2e", "absorb_h1e", "make_rdm2"):
+            raise AttributeError(name)
+        return getattr(self._solver, name)
+
+    def dump_flags(self, verbose=None):
+        return self
+
+    def kernel(self, *args, **kwargs):
+        self._solver.nroots = self.nroots
+        self._solver.spin = self.spin
+        kwargs["ci0"] = None
+        return self._solver.kernel(*args, **kwargs)
+
+    approx_kernel = kernel
+
+    def make_rdm1s(self, ci, norb, nelec, *args, **kwargs):
+        dm1 = self._solver.make_rdm1(
+            ci, norb, nelec, *args, **kwargs
+        )
+        return 0.5 * dm1, 0.5 * dm1
+
+    def make_rdm12(self, ci, norb, nelec, *args, **kwargs):
+        return self._solver.make_rdm12(
+            ci, norb, nelec, *args, **kwargs
+        )
+
+    def trans_rdm12(self, bra, ket, norb, nelec, *args, **kwargs):
+        return self._solver.trans_rdm12(
+            bra, ket, norb, nelec, *args, **kwargs
+        )
+
+
+class FCIAsDMRG(FCIAsRDM, _dms.DMRGCI):
+    """RDM-only solver returning DMRG-style integer state identifiers."""
+
+    def kernel(self, *args, **kwargs):
+        energy, ci = super().kernel(*args, **kwargs)
+        self._ci = [ci] if self.nroots == 1 else list(ci)
+        states = 0 if self.nroots == 1 else list(range(self.nroots))
+        return energy, states
+
+    approx_kernel = kernel
+
+    def make_rdm1s(self, state, norb, nelec, *args, **kwargs):
+        return super().make_rdm1s(
+            self._ci[state], norb, nelec, *args, **kwargs
+        )
+
+    def make_rdm12(self, state, norb, nelec, *args, **kwargs):
+        return super().make_rdm12(
+            self._ci[state], norb, nelec, *args, **kwargs
+        )
+
+    def trans_rdm12(self, bra, ket, norb, nelec, *args, **kwargs):
+        return super().trans_rdm12(
+            self._ci[bra], self._ci[ket], norb, nelec, *args, **kwargs
+        )
+
+
+class SelectedCIForLPDFT(fci.selected_ci.SelectedCI):
+    """Keep unrelated SelectedCI state-average limitations out of this test."""
+
+    def kernel(self, *args, **kwargs):
+        kwargs.pop("wfnsym", None)
+        return super().kernel(*args, **kwargs)
 
 
 def get_lih (r, n_states=2, functional='ftLDA,VWN3', basis='sto3g'):
@@ -38,6 +124,43 @@ def get_lih (r, n_states=2, functional='ftLDA,VWN3', basis='sto3g'):
     mc = mc.multi_state(weights, "lin")
     mc = mc.run()
     return mc
+
+
+def get_dmrglpdft(r):
+    mol = gto.M(
+        atom="Li 0 0 0\nH {} 0 0".format(r),
+        basis="sto3g",
+        output="/dev/null",
+        verbose=0,
+    )
+    mf = scf.RHF(mol).run()
+    mc = mcpdft.CASSCF(mf, "ftLDA,VWN3", 2, 2, grids_level=1)
+    mc.fcisolver = FCIAsDMRG(mol)
+    return mc.multi_state([0.5, 0.5], "lin").run()
+
+
+def get_rdm_lpdft(r):
+    mol = gto.M(
+        atom="Li 0 0 0\nH {} 0 0".format(r),
+        basis="sto3g",
+        output="/dev/null",
+        verbose=0,
+    )
+    mf = scf.RHF(mol).run()
+    mc = mcpdft.CASSCF(mf, "ftLDA,VWN3", 2, 2, grids_level=1)
+    mc.fcisolver = FCIAsRDM(mol)
+    return mc.multi_state([0.5, 0.5], "lin").run()
+
+
+def get_selected_ci_lpdft(mf, solver=None):
+    mc = mcpdft.CASCI(mf, "ftLDA,VWN3", 5, 2, grids_level=1)
+    mc.canonicalization = False
+    if solver is not None:
+        mc.fcisolver = solver
+    mc = mc.multi_state([0.5, 0.5], "lin")
+    mc.kernel(dump_chk=False)
+    return mc
+
 
 def get_water(functional='tpbe', basis='6-31g'):
     mol = gto.M(atom='''
@@ -90,7 +213,8 @@ def get_water_triplet(functional='tPBE', basis="6-31G"):
 
 
 def setUpModule():
-    global lih, lih_4, lih_tpbe, lih_tpbe0, lih_mc23, water, t_water, original_grids
+    global lih, lih_4, lih_tpbe, lih_tpbe0, lih_mc23, rdm_lpdft, dmrglpdft
+    global selected_ci_ref, selected_ci_lpdft, water, t_water, original_grids
     original_grids = dft.radi.ATOM_SPECIFIC_TREUTLER_GRIDS
     dft.radi.ATOM_SPECIFIC_TREUTLER_GRIDS = False
     lih = get_lih(1.5)
@@ -98,20 +222,30 @@ def setUpModule():
     lih_tpbe = get_lih(1.5, functional="tPBE")
     lih_tpbe0 = get_lih(1.5, functional="tPBE0")
     lih_mc23 = get_lih(1.5, functional="MC23")
+    rdm_lpdft = get_rdm_lpdft(1.5)
+    dmrglpdft = get_dmrglpdft(1.5)
+    selected_ci_ref = get_selected_ci_lpdft(lih_4._scf)
+    selected_ci_lpdft = get_selected_ci_lpdft(
+        lih_4._scf, solver=SelectedCIForLPDFT(lih_4.mol)
+    )
     water = get_water()
     t_water = get_water_triplet()
 
 def tearDownModule():
-    global lih, lih_4, lih_tpbe0, lih_tpbe, t_water, water, original_grids, lih_mc23
+    global lih, lih_4, lih_tpbe0, lih_tpbe, lih_mc23, rdm_lpdft, dmrglpdft
+    global selected_ci_ref, selected_ci_lpdft, t_water, water, original_grids
     dft.radi.ATOM_SPECIFIC_TREUTLER_GRIDS = original_grids
     lih.mol.stdout.close()
     lih_4.mol.stdout.close()
     lih_tpbe0.mol.stdout.close()
     lih_tpbe.mol.stdout.close()
     lih_mc23.mol.stdout.close()
+    rdm_lpdft.mol.stdout.close()
+    dmrglpdft.mol.stdout.close()
     water.mol.stdout.close()
     t_water.mol.stdout.close()
-    del lih, lih_4, lih_tpbe0, lih_tpbe, t_water, water, original_grids, lih_mc23
+    del lih, lih_4, lih_tpbe0, lih_tpbe, lih_mc23, rdm_lpdft, dmrglpdft
+    del selected_ci_ref, selected_ci_lpdft, t_water, water, original_grids
 
 class KnownValues(unittest.TestCase):
 
@@ -142,6 +276,63 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(abs(hcoup), HCOUP_EXPECTED, 7)
         self.assertListAlmostEqual(hdiag, HDIAG_EXPECTED, 7)
         self.assertListAlmostEqual(e_states, E_STATES_EXPECTED, 7)
+
+    def test_lih_dmrg_lpdft(self):
+        self.assertIsInstance(dmrglpdft, lpdft_module._LPDFTDMRG)
+        self.assertIsInstance(dmrglpdft, lpdft_module._LPDFTFCISolver)
+        self.assertListAlmostEqual(dmrglpdft.e_states, lih.e_states, 7)
+        self.assertListAlmostEqual(
+            dmrglpdft.get_lpdft_diag(), lih.get_lpdft_diag(), 7
+        )
+        self.assertAlmostEqual(
+            abs(dmrglpdft.lpdft_ham[1, 0]), abs(lih.lpdft_ham[1, 0]), 7
+        )
+        self.assertEqual(dmrglpdft.ci, [0, 1])
+
+    def test_rdm_only_fcisolver_lpdft(self):
+        self.assertIsInstance(rdm_lpdft, lpdft_module._LPDFTFCISolver)
+        self.assertNotIsInstance(lih, lpdft_module._LPDFTFCISolver)
+        self.assertListAlmostEqual(rdm_lpdft.e_states, lih.e_states, 7)
+        self.assertListAlmostEqual(
+            rdm_lpdft.get_lpdft_diag(), lih.get_lpdft_diag(), 7
+        )
+        self.assertAlmostEqual(
+            abs(rdm_lpdft.lpdft_ham[1, 0]), abs(lih.lpdft_ham[1, 0]), 7
+        )
+
+    def test_selected_ci_lpdft(self):
+        self.assertIsInstance(
+            selected_ci_lpdft, lpdft_module._LPDFTFCISolver
+        )
+        self.assertListAlmostEqual(
+            selected_ci_lpdft.e_states, selected_ci_ref.e_states, 9
+        )
+        self.assertListAlmostEqual(
+            selected_ci_lpdft.lpdft_ham.ravel(),
+            selected_ci_ref.lpdft_ham.ravel(),
+            9,
+        )
+        for ci in selected_ci_lpdft.ci:
+            self.assertIsInstance(ci, fci.selected_ci.SCIvector)
+            self.assertIsNotNone(ci._strs)
+
+    def test_dmrg_lpdft_not_implemented(self):
+        with self.assertRaisesRegex(
+            NotImplementedError, "DMRG-LPDFT nuclear gradients"
+        ):
+            dmrglpdft.nuc_grad_method()
+        with self.assertRaisesRegex(
+            NotImplementedError, "DMRG-LPDFT nuclear gradients"
+        ):
+            dmrglpdft.Gradients()
+        with self.assertRaisesRegex(
+            NotImplementedError, "DMRG-LPDFT adiabatic wavefunctions"
+        ):
+            dmrglpdft._get_ci_adiabats(dmrglpdft.ci)
+        with self.assertRaisesRegex(
+            NotImplementedError, "DMRG-LPDFT dipole moments"
+        ):
+            dmrglpdft.dip_moment()
 
     def test_lih_4_states_adiabat(self):
         e_mcscf_avg = np.dot(lih_4.e_mcscf, lih_4.weights)
