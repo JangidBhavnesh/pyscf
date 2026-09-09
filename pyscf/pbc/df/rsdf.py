@@ -87,7 +87,8 @@ class RSGDF(GDF):
     _keys = {
         'use_bvk', 'precision_R', 'precision_G', 'npw_max', '_omega_min',
         'omega', 'ke_cutoff', 'mesh_compact', 'omega_j2c', 'mesh_j2c',
-        'precision_j2c', 'j2c_eig_always', 'kpts',
+        'precision_j2c', 'j2c_eig_always', 'kpts', 'direct', 'semidirect',
+        'ksym',
     }
 
     def weighted_coulG(self, kpt=np.zeros(3), exx=False, mesh=None, omega=None):

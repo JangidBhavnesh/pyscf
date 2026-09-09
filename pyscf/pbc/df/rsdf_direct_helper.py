@@ -170,7 +170,8 @@ def get_j2c_lr(mydf, auxcell=None, kpts=None, omega=None, mesh=None, out=None,
     log.debug2('j2c_lr: max_memory %s (MB)  blocksize %s', max_memory, blksize)
 
     for k, kpt in enumerate(kpts):
-        coulG_lr = mydf.weighted_coulG(omega_j2c, kpt, False, mesh_j2c)
+        coulG_lr = mydf.weighted_coulG(
+            kpt=kpt, exx=False, mesh=mesh_j2c, omega=omega_j2c)
         for p0, p1 in lib.prange(0, ngrids, blksize):
             aoaux = ft_ao.ft_ao(auxcell, Gv[p0:p1], None, b, gxyz[p0:p1],
                                 Gvbase, kpt).T
@@ -298,7 +299,7 @@ def aux_e2_nospltbas(cell, auxcell_or_auxbasis, omega, intor='int3c2e', aosym='s
     if verbose is None: verbose = cell.verbose
     log = logger.Logger(cell.stdout, verbose)
 
-    if isinstance(auxcell_or_auxbasis, mol_gto.Mole):
+    if isinstance(auxcell_or_auxbasis, mol_gto.MoleBase):
         auxcell = auxcell_or_auxbasis
     else:
         from pyscf.pbc.df.incore import make_auxcell
@@ -526,7 +527,8 @@ def add_j3c_lr_q_(mydf, j3c, kpt, adapted_kptjs, adapted_ji_idx,
     if gLRI is None:
         auxshls_slice = (shls_slice[-2], shls_slice[-1])
         Gaux = ft_ao.ft_ao(auxcell, Gv, auxshls_slice, b, gxyz, Gvbase, kpt)
-        wcoulG_lr = mydf.weighted_coulG(omega, kpt, False, mesh)
+        wcoulG_lr = mydf.weighted_coulG(
+            kpt=kpt, exx=False, mesh=mesh, omega=omega)
         Gaux *= wcoulG_lr.reshape(-1,1)
         gLR = Gaux.real.copy('C')
         gLI = Gaux.imag.copy('C')
@@ -548,7 +550,7 @@ def add_j3c_lr_q_(mydf, j3c, kpt, adapted_kptjs, adapted_ji_idx,
     buf = np.empty(nkptj*Gblksize*ncol, dtype=np.complex128)
     for p0, p1 in lib.prange(0, ngrids, Gblksize):
         # shape: nkptj, nG, ncol
-        dat = ft_ao.ft_aopair_kpts(cell, Gv[p0:p1], shls_slice, aosym_,
+        dat = ft_ao.ft_aopair_kpts(cell, Gv[p0:p1], shls_slice[:4], aosym_,
                                    b, gxyz[p0:p1], Gvbase, kpt,
                                    adapted_kptjs, out=buf,
                                    bvk_kmesh=bvk_kmesh)
@@ -796,7 +798,8 @@ def loop_j3c(mydf, kptij_lst=np.zeros((1,2,3)), aosym='s1', j3c_order=J3C_ORDER,
         kgLRI = np.empty((len(uniq_kpts),2,ngrids,naoaux), dtype=np.float64)
         for k,kpt in enumerate(uniq_kpts):
             Gaux = ft_ao.ft_ao(auxcell, Gv, auxshls_slice, b, gxyz, Gvbase, kpt)
-            wcoulG_lr = mydf.weighted_coulG(omega, kpt, False, mesh)
+            wcoulG_lr = mydf.weighted_coulG(
+                kpt=kpt, exx=False, mesh=mesh, omega=omega)
             Gaux *= wcoulG_lr.reshape(-1,1)
             kgLRI[k,0] = Gaux.real
             kgLRI[k,1] = Gaux.imag
@@ -901,7 +904,8 @@ def search_best_omega(mydf, omega_mesh=None, nsample=3, kptij_lst=np.zeros((1,2,
             kgLRI = np.empty((len(uniq_kpts),2,ngrids,naoaux_blk), dtype=np.float64)
             for k,kpt in enumerate(uniq_kpts):
                 Gaux = ft_ao.ft_ao(auxcell, Gv, auxshls_slice, b, gxyz, Gvbase, kpt)
-                wcoulG_lr = mydf_.weighted_coulG(omega, kpt, False, mesh)
+                wcoulG_lr = mydf_.weighted_coulG(
+                    kpt=kpt, exx=False, mesh=mesh, omega=omega)
                 Gaux *= wcoulG_lr.reshape(-1,1)
                 kgLRI[k,0] = Gaux.real
                 kgLRI[k,1] = Gaux.imag
