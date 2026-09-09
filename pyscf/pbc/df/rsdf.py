@@ -60,6 +60,15 @@ from pyscf.pbc.tools import k2gamma
 from pyscf.pbc.lib.kpts_helper import (is_zero, member, unique,
                                        members_with_wrap_around)
 from pyscf.df.addons import make_auxmol
+from pyscf.pbc import tools as pbctools
+from pyscf.pbc.lib.kpts_helper import (is_zero, gamma_point, member, unique,
+                                       KPT_DIFF_TOL)
+from pyscf.pbc.df import aft
+from pyscf.pbc.df.aft import _sub_df_jk_
+from pyscf import lib
+from pyscf.lib import logger
+
+LONGRANGE_AFT_TURNOVER_THRESHOLD = 2.5
 
 
 def get_aux_chg(auxcell):
@@ -90,9 +99,16 @@ class RSGDF(GDF):
 RSGDF for low-dimensional systems are not available yet. We recommend using
 cell.dimension=3 with large vacuum.""")
 
+        # integral-direct
+        self.direct = False
+        self.semidirect = False
+        self.ksym = 's2' # TODO: make it method specific (e.g., ksym for exx, ao2mo etc.)
+
         # if True and kpts are gamma-inclusive, RSDF will use the bvk cell
         # trick for computing both j3c_SR and j3c_LR. If kpts are not
         # gamma-inclusive, this attribute will be ignored.
+        # Use list for setting SR and LR separately, e.g., [True, False] means
+        # use bvk only for SR.
         self.use_bvk = True
 
         # precision for real-space lattice sum (R) and reciprocal-space
@@ -144,6 +160,8 @@ cell.dimension=3 with large vacuum.""")
         log.info('******** %s ********', self.__class__)
         log.info('cell num shells = %d, num cGTOs = %d, num pGTOs = %d',
                  cell.nbas, cell.nao_nr(), cell.npgto_nr())
+        log.info('direct = %s', self.direct)
+        log.info('semidirect = %s', self.semidirect)
         log.info('use_bvk = %s', self.use_bvk)
         log.info('precision_R = %s', self.precision_R)
         log.info('precision_G = %s', self.precision_G)
@@ -312,10 +330,84 @@ cell.dimension=3 with large vacuum.""")
         self.dump_flags()
 
         # do normal gdf build with the modified _make_j3c
-        self._gdf_build(j_only=j_only, with_j3c=with_j3c)
+        if not self.direct:
+            self._gdf_build(j_only=j_only, with_j3c=with_j3c)
 
         return self
 
+    # Note: Special exxdiv by default should not be used for an arbitrary
+    # input density matrix. When the df object was used with the molecular
+    # post-HF code, get_jk was often called with an incomplete DM (e.g. the
+    # core DM in CASCI). An SCF level exxdiv treatment is inadequate for
+    # post-HF methods.
+    def get_jk(self, dm, hermi=1, kpts=None, kpts_band=None,
+               with_j=True, with_k=True, omega=None, exxdiv=None):
+
+        if not self.direct:
+            from pyscf.pbc.df import df
+            return df.GDF.get_jk(self, dm, hermi=hermi, kpts=kpts, kpts_band=kpts_band,
+                                 with_j=with_j, with_k=with_k, omega=omega, exxdiv=exxdiv)
+
+        # Integral-direct JK starts here
+        from pyscf.pbc.df import rsdf_direct_jk
+        if omega is not None:  # J/K for RSH functionals
+            cell = self.cell
+            # * AFT is computationally more efficient than GDF if the Coulomb
+            #   attenuation tends to the long-range role (i.e. small omega).
+            # * Note: changing to AFT integrator may cause small difference to
+            #   the GDF integrator. If a very strict GDF result is desired,
+            #   we can disable this trick by setting
+            #   LONGRANGE_AFT_TURNOVER_THRESHOLD to 0.
+            # * The sparse mesh is not appropriate for low dimensional systems
+            #   with infinity vacuum since the ERI may require large mesh to
+            #   sample density in vacuum.
+            if (omega < LONGRANGE_AFT_TURNOVER_THRESHOLD and
+                cell.dimension >= 2 and cell.low_dim_ft_type != 'inf_vacuum'):
+                mydf = aft.AFTDF(cell, self.kpts)
+                mydf.ke_cutoff = aft.estimate_ke_cutoff_for_omega(cell, omega)
+                mydf.mesh = pbctools.cutoff_to_mesh(cell.lattice_vectors(), mydf.ke_cutoff)
+            else:
+                mydf = self
+            return _sub_df_jk_(mydf, dm, hermi, kpts, kpts_band,
+                               with_j, with_k, omega, exxdiv)
+
+        if kpts is None:
+            if np.all(self.kpts == 0):
+                # Gamma-point calculation by default
+                kpts = np.zeros(3)
+            else:
+                kpts = self.kpts
+        kpts = np.asarray(kpts)
+
+        if isinstance(self.use_bvk, bool):
+            use_bvk_R = use_bvk_G = self.use_bvk
+        else:
+            use_bvk_R,  use_bvk_G = self.use_bvk
+        if use_bvk_R or use_bvk_G:
+            from pyscf.pbc.df.rsdf_direct_helper import kpts_to_kmesh
+            bvk_kmesh0 = kpts_to_kmesh(self.cell, kpts)
+            bvk_kmesh = [bvk_kmesh0 if use_bvk_R else None,
+                         bvk_kmesh0 if use_bvk_G else None]
+        else:
+            bvk_kmesh = None
+
+        semidirect = self.semidirect
+        ksym = self.ksym
+
+        if kpts.shape == (3,):
+            bvk_kmesh_ = None if kpts_band is None else bvk_kmesh
+            return rsdf_direct_jk.get_jk(self, dm, hermi, kpts, kpts_band, exxdiv,
+                                         with_j, with_k, bvk_kmesh_, semidirect)
+
+        vj = vk = None
+        if with_k:
+            vk = rsdf_direct_jk.get_k_kpts(self, dm, hermi, kpts, kpts_band, exxdiv,
+                                           bvk_kmesh=bvk_kmesh, semidirect=semidirect,
+                                           ksym=ksym)
+        if with_j:
+            vj = rsdf_direct_jk.get_j_kpts(self, dm, hermi, kpts, kpts_band,
+                                           bvk_kmesh=bvk_kmesh)
+        return vj, vk
 
 RSDF = RSGDF
 

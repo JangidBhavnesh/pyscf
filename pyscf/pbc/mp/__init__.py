@@ -18,6 +18,7 @@ from pyscf.pbc.mp import mp2
 from pyscf.pbc.mp import kmp2
 from pyscf.pbc.mp import kmp2_ksymm
 from pyscf.pbc.lib import kpts as libkpts
+from pyscf.pbc.mp import kmp2_direct
 
 def RMP2(mf, frozen=None, mo_coeff=None, mo_occ=None):
     mf = mf.to_rhf()
@@ -36,6 +37,8 @@ def GMP2(mf, frozen=None, mo_coeff=None, mo_occ=None):
 def KRMP2(mf, frozen=None, mo_coeff=None, mo_occ=None):
     if isinstance(mf.kpts, libkpts.KPoints):
         return kmp2_ksymm.KRMP2(mf, frozen, mo_coeff, mo_occ)
+    if getattr(mf.with_df, 'direct', False):
+        return kmp2_direct.KRMP2_direct(mf, frozen, mo_coeff, mo_occ)
     else:
         return kmp2.KRMP2(mf, frozen, mo_coeff, mo_occ)
 
