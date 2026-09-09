@@ -649,7 +649,7 @@ class _LPDFTMix(_LPDFT):
         """
         adiabat_ci = [
             np.tensordot(
-                self.si_pdft[irrep_slice, irrep_slice],
+                self.si_pdft[irrep_slice, irrep_slice].T,
                 np.asarray(ci_mcscf[irrep_slice]),
                 axes=1,
             )

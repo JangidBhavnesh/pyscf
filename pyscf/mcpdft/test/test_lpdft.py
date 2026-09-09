@@ -17,6 +17,7 @@
 
 import h5py
 import numpy as np
+from scipy import linalg
 from pyscf import gto, scf, dft, fci, lib
 from pyscf import mcpdft
 from pyscf.mcpdft import _dms
@@ -161,6 +162,22 @@ def get_selected_ci_lpdft(mf, solver=None):
     mc.kernel(dump_chk=False)
     return mc
 
+def get_lih_mixed(functional='ftLDA,VWN3', basis='sto3g'):
+    mol = gto.M(atom='Li 0 0 0\nH 1.5 0 0', basis=basis,
+                output='/dev/null', verbose=0)
+    mf = scf.RHF(mol).run()
+
+    def spin_solver(ss):
+        solver = fci.direct_spin1.FCI(mol)
+        solver.spin = ss
+        solver = fci.addons.fix_spin(solver, ss=ss)
+        solver.nroots = 2
+        return solver
+
+    mc = mcpdft.CASSCF(mf, functional, 5, 2, grids_level=1)
+    return mc.multi_state_mix(
+        [spin_solver(0), spin_solver(2)], [0.25] * 4, 'lin'
+    ).run()
 
 def get_water(functional='tpbe', basis='6-31g'):
     mol = gto.M(atom='''
@@ -213,12 +230,17 @@ def get_water_triplet(functional='tPBE', basis="6-31G"):
 
 
 def setUpModule():
+<<<<<<< HEAD
     global lih, lih_4, lih_tpbe, lih_tpbe0, lih_mc23, rdm_lpdft, dmrglpdft
     global selected_ci_ref, selected_ci_lpdft, water, t_water, original_grids
+=======
+    global lih, lih_4, lih_mixed, lih_tpbe, lih_tpbe0, lih_mc23, water, t_water, original_grids
+>>>>>>> master
     original_grids = dft.radi.ATOM_SPECIFIC_TREUTLER_GRIDS
     dft.radi.ATOM_SPECIFIC_TREUTLER_GRIDS = False
     lih = get_lih(1.5)
     lih_4 = get_lih(1.5, n_states=4, basis="6-31G")
+    lih_mixed = get_lih_mixed()
     lih_tpbe = get_lih(1.5, functional="tPBE")
     lih_tpbe0 = get_lih(1.5, functional="tPBE0")
     lih_mc23 = get_lih(1.5, functional="MC23")
@@ -234,9 +256,11 @@ def setUpModule():
 def tearDownModule():
     global lih, lih_4, lih_tpbe0, lih_tpbe, lih_mc23, rdm_lpdft, dmrglpdft
     global selected_ci_ref, selected_ci_lpdft, t_water, water, original_grids
+    global lih, lih_4, lih_mixed, lih_tpbe0, lih_tpbe, t_water, water, original_grids, lih_mc23
     dft.radi.ATOM_SPECIFIC_TREUTLER_GRIDS = original_grids
     lih.mol.stdout.close()
     lih_4.mol.stdout.close()
+    lih_mixed.mol.stdout.close()
     lih_tpbe0.mol.stdout.close()
     lih_tpbe.mol.stdout.close()
     lih_mc23.mol.stdout.close()
@@ -246,6 +270,7 @@ def tearDownModule():
     t_water.mol.stdout.close()
     del lih, lih_4, lih_tpbe0, lih_tpbe, lih_mc23, rdm_lpdft, dmrglpdft
     del selected_ci_ref, selected_ci_lpdft, t_water, water, original_grids
+    del lih, lih_4, lih_mixed, lih_tpbe0, lih_tpbe, t_water, water, original_grids, lih_mc23
 
 class KnownValues(unittest.TestCase):
 
@@ -253,6 +278,18 @@ class KnownValues(unittest.TestCase):
         self.assertTrue(len(first_list) == len(second_list))
         for first, second in zip(first_list, second_list):
             self.assertAlmostEqual(first, second, expected)
+
+    def test_lih_reconstruct_lpdft_ham_same_spin(self):
+        h_reconstructed = lih.make_lpdft_ham_(ci=lih.ci)
+        np.testing.assert_allclose(
+            h_reconstructed, np.diag(lih.e_states), rtol=0, atol=1e-10
+        )
+
+    def test_lih_reconstruct_lpdft_ham_mixed_spin(self):
+        h_reconstructed = linalg.block_diag(*lih_mixed.make_lpdft_ham_(ci=lih_mixed.ci))
+        np.testing.assert_allclose(
+            h_reconstructed, np.diag(lih_mixed.e_states), rtol=0, atol=1e-10
+        )
 
     def test_lih_2_states_adiabat(self):
         e_mcscf_avg = np.dot (lih.e_mcscf, lih.weights)
@@ -264,7 +301,7 @@ class KnownValues(unittest.TestCase):
         # Reference values from OpenMolcas v22.02, tag 177-gc48a1862b
         E_MCSCF_AVG_EXPECTED = -7.78902185
 
-        # Below reference values from 
+        # Below reference values from
         #   - PySCF commit 71fc2a41e697fec76f7f9a5d4d10fd2f2476302c
         #   - mrh   commit c5fc02f1972c1c8793061f20ed6989e73638fc5e
         HCOUP_EXPECTED = 0.01663680
@@ -381,7 +418,7 @@ class KnownValues(unittest.TestCase):
         hcoup = abs(lih_mc23.lpdft_ham[1,0])
         hdiag = lih_mc23.get_lpdft_diag()
 
-        # Reference values from 
+        # Reference values from
         #     - PySCF       commit 9a0bb6ddded7049bdacdaf4cfe422f7ce826c2c7
         #     - PySCF-forge commit eb0ad96f632994d2d1846009ecce047193682526
         E_MCSCF_AVG_EXPECTED = -7.78902182
@@ -436,7 +473,7 @@ class KnownValues(unittest.TestCase):
                 self.assertEqual(lib.fp(mc.mo_coeff), lib.fp(lib.chkfile.load(mc.chkfile, "pdft/mo_coeff")))
                 self.assertEqual(mc.e_tot, lib.chkfile.load(mc.chkfile, "pdft/e_tot"))
                 self.assertEqual(lib.fp(mc.e_mcscf), lib.fp(lib.chkfile.load(mc.chkfile, "pdft/e_mcscf")))
-                self.assertEqual(lib.fp(mc.e_states), lib.fp(lib.chkfile.load(mc.chkfile, "pdft/e_states")))        
+                self.assertEqual(lib.fp(mc.e_states), lib.fp(lib.chkfile.load(mc.chkfile, "pdft/e_states")))
 
                 # Requires PySCF version > 2.6.2 which is not available on pip currently
                 # for state, (c_ref, c) in enumerate(zip(mc.ci, lib.chkfile.load(mc.chkfile, "pdft/ci"))):
