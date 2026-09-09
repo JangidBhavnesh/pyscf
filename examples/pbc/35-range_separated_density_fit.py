@@ -31,7 +31,7 @@ cell.a = '''
 3.370137329, 0.000000000, 3.370137329
 3.370137329, 3.370137329, 0.000000000'''
 cell.unit = 'B'
-cell.verbose = 6
+cell.verbose = 4
 cell.build()
 
 kmesh = [2,1,1]
@@ -44,6 +44,12 @@ kpts = cell.make_kpts(kmesh)
 mf = scf.KRHF(cell, kpts).rs_density_fit()
 mf.kernel()
 
+## Integral direct approach:
+nmf = scf.KRHF(cell, kpts).rs_density_fit()
+nmf.with_df.direct = True
+nmf.kernel()
+
+print("Difference in SCF energy: %.10f" % (mf.e_tot-nmf.e_tot))
 
 #
 # One can also initialize a RSDF instance separately and overwrite 'SCF.with_df'
