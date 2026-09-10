@@ -7,6 +7,7 @@ More examples can be found in 12-excited_state_casscf_grad.py
 '''
 
 import pyscf
+from pyscf.grad.sacasscf import OPT_Gradients
 
 mol = pyscf.M(
     atom = 'N 0 0 0; N 0 0 1.2',
@@ -27,3 +28,6 @@ de_0 = sa_mc_grad.kernel(state=0)
 
 # Nuclear gradients for state 2
 de_1 = sa_mc_grad.kernel(state=1)
+
+# Use the optimized implementation with the existing SA-CASSCF wave function.
+de_0_opt = OPT_Gradients(sa_mc).kernel(state=0)
