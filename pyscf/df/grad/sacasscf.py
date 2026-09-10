@@ -16,6 +16,7 @@
 # Author: Qiming Sun <osirpt.sun@gmail.com>
 #
 
+import ctypes
 import numpy as np
 import time
 import gc
@@ -297,95 +298,239 @@ def Lci_dot_dgci_dx (Lci, weights, mc, mo_coeff=None, ci=None, atmlst=None, mf_g
     return de
 
 
-def _grad_elec_dferi_pair_sum(mc, mo_df_pairs, atmlst, max_memory):
-    '''Contract several (mo0, mo1, df-RDM2) terms in one int3c2e_ip1 pass.'''
-    mol = mc.mol
-    auxmol = mc.with_df.auxmol
-    nao, nbas = mol.nao, mol.nbas
-    naux = auxmol.nao
-    de = np.zeros((nao, 3))
+def _grad_elec_df_response_direct(mc, mf_grad, dms, pair_weights,
+                                  mo_df_pairs, atmlst, max_memory,
+                                  auxbasis_response=True):
+    '''Directly contract all DF response terms into atomic gradients.
 
-    get_int3c = _int3c_wrapper(mol, auxmol, 'int3c2e_ip1', 's1')
-    max_memory -= lib.current_memory()[0]
-    max_nmo = max(mo1.shape[1] for mo0, mo1, dfcasdm2 in mo_df_pairs)
-    blklen = nao * (3*nao + 3*max_nmo + max_nmo)
-    blksize = int(min(max(max_memory * 1e6 / 8 / blklen, 20), 240))
-    aux_loc = auxmol.ao_loc
-    for shl0, shl1, nL in balance_partition(aux_loc, blksize):
-        p0, p1 = aux_loc[shl0], aux_loc[shl1]
-        int3c = get_int3c((0, nbas, 0, nbas, shl0, shl1))
-        for mo0, mo1, dfcasdm2 in mo_df_pairs:
-            intbuf = lib.einsum('xuvp,vj->xupj', int3c, mo1)
-            dm2buf = lib.einsum('ui,pij->upj', mo0,
-                                dfcasdm2[p0:p1])
-            de -= np.einsum('upj,xupj->ux', dm2buf, intbuf)
-
-            intbuf = lib.einsum('xuvp,vj->xupj', int3c, mo0)
-            dm2buf = lib.einsum('uj,pij->upi', mo1,
-                                dfcasdm2[p0:p1])
-            de -= np.einsum('upj,xupj->ux', dm2buf, intbuf)
-
-    aoslices = mol.aoslice_by_atom()
-    de = np.asarray([de[p0:p1].sum(axis=0)
-                     for p0, p1 in aoslices[:,2:]])
-    return np.ascontiguousarray(de[np.asarray(list(atmlst))])
-
-
-def _grad_elec_auxresponse_dferi_pair_sum(mc, mo_df_pairs, atmlst,
-                                           max_memory):
-    '''Contract several DF-RDM2 terms in one int2c/ip2 auxiliary pass.'''
+    This follows the direct-contraction layout used in
+    ``gpu4pyscf/df/grad/jk.py:get_grad_vjk``: derivative three-center
+    integrals are generated once and immediately contracted into forces.
+    ``pair_weights[i,j]`` selects the one-particle density pairs required by
+    the SA-CASSCF response, avoiding the dense nset-by-nset auxiliary tensor.
+    The active-space DF-RDM2 terms share the same ip1 and ip2 integral loops.
+    '''
     mol = mc.mol
     auxmol = mc.with_df.auxmol
     nao, nbas, naux = mol.nao, mol.nbas, auxmol.nao
+    dms = np.asarray(dms).reshape(-1, nao, nao)
+    nset = len(dms)
+    pair_weights = np.asarray(pair_weights)
+    if pair_weights.shape != (nset, nset):
+        raise ValueError('pair_weights must have shape (nset,nset)')
+    active_pairs = np.argwhere(abs(pair_weights) > 1e-14)
+    exchange_pairs = {(int(i), int(j)) for i, j in active_pairs}
+    exchange_pairs.update((j, i) for i, j in tuple(exchange_pairs))
+
+    # The AO derivative matrices are never formed.  For each source density,
+    # combine all right-hand densities before entering the integral loop.
+    right_dms = np.einsum('ij,jpq->ipq', pair_weights, dms)
+
+    diag_idx = np.arange(nao)
+    diag_idx = diag_idx * (diag_idx+1) // 2 + diag_idx
+    dm_tril = dms + dms.transpose(0,2,1)
+    dm_tril = lib.pack_tril(dm_tril)
+    dm_tril[:,diag_idx] *= .5
+
+    orbol, orbor = dfrhf_grad._decompose_rdm1_svd(mf_grad, mol, dms)
+    rhoj, get_rhok = dfrhf_grad._cho_solve_rhojk(
+        mf_grad, mol, auxmol, orbol, orbor)
+    nocc = [orb.shape[-1] for orb in orbor]
+
+    # Prepare the two active-space DF-RDM2 contractions.  Their zero-order
+    # metric solves are still reusable targets for a subsequent optimization.
     prepared = []
-    for mo0, mo1, dfcasdm2 in mo_df_pairs:
-        mosym, nmo_pair, mo_conc, mo_slice = _conc_mos(
-            mo0, mo1, compact=True)
-        dm2 = np.array(dfcasdm2, copy=True)
-        if 's2' in mosym:
-            nmo = mo0.shape[1]
-            dm2 = dm2.reshape(naux, nmo, nmo)
-            dm2 += dm2.transpose(0,2,1)
-            diag_idx = np.arange(nmo)
-            diag_idx = diag_idx * (diag_idx+1) // 2 + diag_idx
-            dm2 = lib.pack_tril(np.ascontiguousarray(dm2))
-            dm2[:,diag_idx] *= .5
-        dm2 = dm2.reshape(naux, nmo_pair)
-        prepared.append((mo0, mo1, mosym, nmo_pair, mo_conc,
-                         mo_slice, dm2))
+    if auxbasis_response:
+        for mo0, mo1, dfcasdm2 in mo_df_pairs:
+            mosym, nmo_pair, mo_conc, mo_slice = _conc_mos(
+                mo0, mo1, compact=True)
+            dm2 = np.array(dfcasdm2, copy=True)
+            if 's2' in mosym:
+                nmo = mo0.shape[1]
+                dm2 = dm2.reshape(naux, nmo, nmo)
+                dm2 += dm2.transpose(0,2,1)
+                idx = np.arange(nmo)
+                idx = idx * (idx+1) // 2 + idx
+                dm2 = lib.pack_tril(np.ascontiguousarray(dm2))
+                dm2[:,idx] *= .5
+            dm2 = dm2.reshape(naux, nmo_pair)
+            prepared.append((mo0, mo1, mosym, nmo_pair, mo_conc,
+                             mo_slice, dm2))
 
-    de = np.zeros((naux, 3))
-    int2c = auxmol.intor('int2c2e_ip1')
-    for mo0, mo1, mosym, nmo_pair, mo_conc, mo_slice, dm2 in prepared:
-        dferi = solve_df_eri(mc, mo_cas=(mo0, mo1)).reshape(
-            naux, nmo_pair)
-        metric_response = np.dot(int2c, dferi)
-        de += lib.einsum('pi,xpi->px', dm2, metric_response)
+    de_aux_active = np.zeros((naux, 3))
+    de_aux_j = np.zeros((naux, 3))
+    de_aux_k = np.zeros((naux, 3))
+    rhok_oo = {}
+    if auxbasis_response:
+        int2c_e1 = auxmol.intor('int2c2e_ip1')
 
-    get_int3c = _int3c_wrapper(mol, auxmol, 'int3c2e_ip2', 's2ij')
-    max_memory -= lib.current_memory()[0]
-    npair = nao * (nao + 1) // 2
-    max_pair = max(item[3] for item in prepared)
-    blklen = 3 * (npair + max_pair)
-    blksize = int(min(max(max_memory * 1e6 / 8 / blklen, 20), 240))
-    aux_loc = auxmol.ao_loc
-    for shl0, shl1, nL in balance_partition(aux_loc, blksize):
-        p0, p1 = aux_loc[shl0], aux_loc[shl1]
-        int3c = get_int3c((0, nbas, 0, nbas, shl0, shl1))
-        int3c = np.ascontiguousarray(
-            int3c.transpose(0,2,1).reshape(3*(p1-p0), npair))
+        # Active-space two-center metric response.
         for mo0, mo1, mosym, nmo_pair, mo_conc, mo_slice, dm2 in prepared:
-            intbuf = _ao2mo.nr_e2(int3c, mo_conc, mo_slice,
-                                  aosym='s2', mosym=mosym)
-            intbuf = np.ascontiguousarray(
-                intbuf.reshape(3, p1-p0, nmo_pair))
-            de[p0:p1] -= lib.einsum('pi,xpi->px', dm2[p0:p1],
-                                     intbuf)
+            dferi = solve_df_eri(mc, mo_cas=(mo0, mo1)).reshape(
+                naux, nmo_pair)
+            metric_response = np.dot(int2c_e1, dferi)
+            de_aux_active += lib.einsum(
+                'pi,xpi->px', dm2, metric_response)
 
+        # Only form exchange intermediates for selected density pairs.  The
+        # generic DF J/K driver constructs all nset**2 combinations.
+        avail_memory = max_memory - lib.current_memory()[0]
+        max_occ = max(nocc)
+        blksize = int(min(max(avail_memory * .5e6 / 8 /
+                              (naux * max_occ), 20), naux))
+        for i, j in sorted(exchange_pairs):
+            buf = np.empty((naux, nocc[i], nocc[j]))
+            for p0, p1 in lib.prange(0, naux, blksize):
+                rhok = get_rhok(i, p0, p1).reshape(
+                    (p1-p0)*nocc[i], nao)
+                buf[p0:p1] = lib.dot(rhok, orbol[j]).reshape(
+                    p1-p0, nocc[i], nocc[j])
+            rhok_oo[i,j] = buf
+
+        # Two-center J/K metric response, accumulated directly rather than
+        # stored as (nset,nset,3,naux).
+        metric_j = {
+            int(j): lib.einsum('xpq,q->px', int2c_e1, rhoj[int(j)])
+            for j in np.unique(active_pairs[:,1])
+        }
+        for i_, j_ in active_pairs:
+            i, j = int(i_), int(j_)
+            weight = pair_weights[i,j]
+            de_aux_j -= weight * rhoj[i,:,None] * metric_j[j]
+            metric_k = lib.einsum(
+                'pij,qji->pq', rhok_oo[i,j], rhok_oo[j,i])
+            de_aux_k -= weight * lib.einsum(
+                'xpq,pq->px', int2c_e1, metric_k)
+
+    de_ao = np.zeros((nao, 3))
+    get_int3c_ip1 = _int3c_wrapper(
+        mol, auxmol, 'int3c2e_ip1', 's1')
+    avail_memory = max_memory - lib.current_memory()[0]
+    blksize = int(min(max(avail_memory * .5e6 / 8 /
+                          (nao**2 * 3), 20), naux, 240))
+    aux_loc = auxmol.ao_loc
+    aux_ranges = balance_partition(aux_loc, blksize)
+
+    fmmm = _ao2mo.libao2mo.AO2MOmmm_bra_nr_s1
+    fdrv = _ao2mo.libao2mo.AO2MOnr_e2_drv
+    ftrans = _ao2mo.libao2mo.AO2MOtranse2_nr_s1
+    null = lib.c_null_ptr()
+
+    # One ip1 pass for both one-particle J/K and active-space DF-RDM2.
+    for shl0, shl1, nL in aux_ranges:
+        p0, p1 = aux_loc[shl0], aux_loc[shl1]
+        int3c_ao = get_int3c_ip1(
+            (0, nbas, 0, nbas, shl0, shl1))
+
+        # Active-space contribution.
+        for mo0, mo1, dfcasdm2 in mo_df_pairs:
+            intbuf = lib.einsum('xuvp,vj->xupj', int3c_ao, mo1)
+            dm2buf = lib.einsum('ui,pij->upj', mo0,
+                                dfcasdm2[p0:p1])
+            de_ao -= np.einsum('upj,xupj->ux', dm2buf, intbuf)
+            intbuf = lib.einsum('xuvp,vj->xupj', int3c_ao, mo0)
+            dm2buf = lib.einsum('uj,pij->upi', mo1,
+                                dfcasdm2[p0:p1])
+            de_ao -= np.einsum('upj,xupj->ux', dm2buf, intbuf)
+
+        # One-particle J/K contribution.  Contract each temporary derivative
+        # matrix immediately with its pre-combined right-hand density.
+        int3c = np.ascontiguousarray(int3c_ao.transpose(0,3,2,1))
+        for i in range(nset):
+            if not np.any(pair_weights[i]):
+                continue
+            vj = np.empty((3, nao, nao))
+            for x in range(3):
+                vj[x] = np.dot(
+                    rhoj[i,p0:p1],
+                    int3c[x].reshape(p1-p0, -1)).reshape(nao, nao).T
+
+            tmp = np.empty((3, p1-p0, nocc[i], nao),
+                           dtype=orbol[i].dtype)
+            fdrv(ftrans, fmmm,
+                 tmp.ctypes.data_as(ctypes.c_void_p),
+                 int3c.ctypes.data_as(ctypes.c_void_p),
+                 orbol[i].ctypes.data_as(ctypes.c_void_p),
+                 ctypes.c_int(3*(p1-p0)), ctypes.c_int(nao),
+                 (ctypes.c_int*4)(0, nocc[i], 0, nao),
+                 null, ctypes.c_int(0))
+            rhok = get_rhok(i, p0, p1)
+            vk = lib.einsum('xpoi,pok->xik', tmp, rhok)
+            veff = -(vj - .5 * vk)
+            de_ao += lib.einsum(
+                'xuv,uv->ux', veff, right_dms[i]) * 2
+
+    de_aux = np.zeros((naux, 3))
+    if auxbasis_response:
+        get_int3c_ip2 = _int3c_wrapper(
+            mol, auxmol, 'int3c2e_ip2', 's2ij')
+        npair = nao * (nao + 1) // 2
+        max_pair = max(item[3] for item in prepared)
+        avail_memory = max_memory - lib.current_memory()[0]
+        blklen = 3 * (npair + max_pair)
+        blksize = int(min(max(avail_memory * 1e6 / 8 / blklen, 20),
+                          240))
+        aux_ranges = balance_partition(aux_loc, blksize)
+        fmmm = _ao2mo.libao2mo.AO2MOmmm_bra_nr_s2
+        ftrans = _ao2mo.libao2mo.AO2MOtranse2_nr_s2
+
+        # Group selected pairs by their left density so the ip2 AO-to-MO
+        # transformation is shared by all requested right densities.
+        right_by_left = {}
+        for i_, j_ in active_pairs:
+            i, j = int(i_), int(j_)
+            right_by_left.setdefault(i, []).append(j)
+
+        for shl0, shl1, nL in aux_ranges:
+            p0, p1 = aux_loc[shl0], aux_loc[shl1]
+            int3c_ao = get_int3c_ip2(
+                (0, nbas, 0, nbas, shl0, shl1))
+            int3c = np.ascontiguousarray(
+                int3c_ao.transpose(0,2,1).reshape(3*(p1-p0), npair))
+
+            drhoj = lib.dot(int3c, dm_tril.T).reshape(
+                3, p1-p0, nset)
+            for i_, j_ in active_pairs:
+                i, j = int(i_), int(j_)
+                de_aux_j[p0:p1] += pair_weights[i,j] * (
+                    drhoj[:,:,i] * rhoj[j,p0:p1][None,:]).T
+
+            for i, js in right_by_left.items():
+                buf = np.empty((3, p1-p0, nocc[i], nao),
+                               dtype=orbol[i].dtype)
+                fdrv(ftrans, fmmm,
+                     buf.ctypes.data_as(ctypes.c_void_p),
+                     int3c.ctypes.data_as(ctypes.c_void_p),
+                     orbol[i].ctypes.data_as(ctypes.c_void_p),
+                     ctypes.c_int(3*(p1-p0)), ctypes.c_int(nao),
+                     (ctypes.c_int*4)(0, nocc[i], 0, nao),
+                     null, ctypes.c_int(0))
+                for j in js:
+                    int3c_ij = lib.dot(buf.reshape(-1, nao), orbor[j])
+                    int3c_ij = int3c_ij.reshape(
+                        3, p1-p0, nocc[i], nocc[j])
+                    de_aux_k[p0:p1] += pair_weights[i,j] * lib.einsum(
+                        'xpij,pij->px', int3c_ij,
+                        rhok_oo[i,j][p0:p1])
+
+            for mo0, mo1, mosym, nmo_pair, mo_conc, mo_slice, dm2 in prepared:
+                intbuf = _ao2mo.nr_e2(
+                    int3c, mo_conc, mo_slice, aosym='s2', mosym=mosym)
+                intbuf = np.ascontiguousarray(
+                    intbuf.reshape(3, p1-p0, nmo_pair))
+                de_aux_active[p0:p1] -= lib.einsum(
+                    'pi,xpi->px', dm2[p0:p1], intbuf)
+
+        de_aux = de_aux_active - (de_aux_j - .5 * de_aux_k)
+
+    aoslices = mol.aoslice_by_atom()
+    de_ao = np.asarray([de_ao[p0:p1].sum(axis=0)
+                        for p0, p1 in aoslices[:,2:]])
     auxslices = auxmol.aoslice_by_atom()
-    de = np.asarray([de[p0:p1].sum(axis=0)
-                     for p0, p1 in auxslices[:,2:]])
-    return np.ascontiguousarray(de[np.asarray(list(atmlst))])
+    de_aux = np.asarray([de_aux[p0:p1].sum(axis=0)
+                         for p0, p1 in auxslices[:,2:]])
+    atmlst = np.asarray(list(atmlst))
+    return np.ascontiguousarray(de_ao[atmlst] + de_aux[atmlst])
 
 
 def Lorb_Lci_dot_dgorb_dgci_dx(Lorb, Lci, weights, mc, mo_coeff=None,
@@ -394,9 +539,9 @@ def Lorb_Lci_dot_dgorb_dgci_dx(Lorb, Lci, weights, mc, mo_coeff=None,
                                auxbasis_response=True):
     '''Combined DF Hamiltonian, orbital, and CI SA-CASSCF response.
 
-    All J/K densities are batched.  The effective active-space DF densities
-    are contracted in one ``int3c2e_ip1`` pass and, when requested, one
-    ``int3c2e_ip2`` auxiliary-response pass.
+    Selected J/K density pairs and the effective active-space DF densities
+    are contracted directly in one ``int3c2e_ip1`` pass and, when requested,
+    one ``int3c2e_ip2`` auxiliary-response pass.
     '''
     if mo_coeff is None: mo_coeff = mc.mo_coeff
     if ci is None: ci = mc.ci
@@ -504,26 +649,11 @@ def Lorb_Lci_dot_dgorb_dgci_dx(Lorb, Lci, weights, mc, mo_coeff=None,
                      mo_coeff.T))
     aapa = aapaL = vj = vk = None
 
-    vj, vk = mf_grad.get_jk(mol, jk_dms)
-    vhf1 = vj - vk * .5
-    vhf1c, vhf1a, vhf1cL, vhf1aL, vhf1a_ci = vhf1[:5]
-    de_aux = np.zeros((len(atmlst), 3))
-    if auxbasis_response:
-        jk_aux = vj.aux - .5 * vk.aux
-        de_aux_jk = ((jk_aux[0,2] + jk_aux[2,0])
-                     + (jk_aux[0,3] + jk_aux[2,1])
-                     + (jk_aux[1,2] + jk_aux[3,0])
-                     + jk_aux[0,4] + jk_aux[4,0])
-        if with_ham_response:
-            de_aux_jk += jk_aux[0,0] + jk_aux[0,5] + jk_aux[5,0]
-        de_aux = de_aux_jk[np.asarray(atmlst)]
-
     hcore_deriv = mf_grad.hcore_generator(mol)
     s1 = mf_grad.get_ovlp(mol)
     dm1_hcore = dm1L + dm_cas_ci
     dme0_total = dme0 + dme0_ci
     if with_ham_response:
-        vhf1a_ham = vhf1[5]
         dm1_hcore += dm1_ham
         dme0_total += dme0_ham
 
@@ -542,11 +672,16 @@ def Lorb_Lci_dot_dgorb_dgci_dx(Lorb, Lci, weights, mc, mo_coeff=None,
     mo_df_pairs = ((mo_cas, mo_cas, df_external_regular),
                    (mo_cas, moL_cas, df_orb))
 
-    de_eri = _grad_elec_dferi_pair_sum(
-        mc, mo_df_pairs, atmlst, mc.max_memory)
-    if auxbasis_response:
-        de_aux += _grad_elec_auxresponse_dferi_pair_sum(
-            mc, mo_df_pairs, atmlst, mc.max_memory)
+    pair_weights = np.zeros((len(jk_dms), len(jk_dms)))
+    for i, j in ((0,2), (2,0), (0,3), (2,1), (1,2), (3,0),
+                 (0,4), (4,0)):
+        pair_weights[i,j] += 1
+    if with_ham_response:
+        for i, j in ((0,0), (0,5), (5,0)):
+            pair_weights[i,j] += 1
+    de_df = _grad_elec_df_response_direct(
+        mc, mf_grad, jk_dms, pair_weights, mo_df_pairs, atmlst,
+        mc.max_memory, auxbasis_response=auxbasis_response)
 
     aoslices = mol.aoslice_by_atom()
     de_hcore = np.zeros((len(atmlst),3))
@@ -558,30 +693,11 @@ def Lorb_Lci_dot_dgorb_dgci_dx(Lorb, Lci, weights, mc, mo_coeff=None,
         de_renorm[k] -= np.einsum(
             'xij,ij->x', s1[:,p0:p1], dme0_total[p0:p1]) * 2
 
-        de_eri[k] += np.einsum(
-            'xij,ij->x', vhf1c[:,p0:p1], dm1L[p0:p1]) * 2
-        de_eri[k] += np.einsum(
-            'xij,ij->x', vhf1cL[:,p0:p1], dm1[p0:p1]) * 2
-        de_eri[k] += np.einsum(
-            'xij,ij->x', vhf1a[:,p0:p1], dmL_core[p0:p1]) * 2
-        de_eri[k] += np.einsum(
-            'xij,ij->x', vhf1aL[:,p0:p1], dm_core[p0:p1]) * 2
-        de_eri[k] += np.einsum(
-            'xij,ij->x', vhf1c[:,p0:p1], dm_cas_ci[p0:p1]) * 2
-        de_eri[k] += np.einsum(
-            'xij,ij->x', vhf1a_ci[:,p0:p1], dm_core[p0:p1]) * 2
-        if with_ham_response:
-            de_eri[k] += np.einsum(
-                'xij,ij->x', vhf1c[:,p0:p1], dm1_ham[p0:p1]) * 2
-            de_eri[k] += np.einsum(
-                'xij,ij->x', vhf1a_ham[:,p0:p1], dm_core[p0:p1]) * 2
-
     lib.logger.debug(mc, 'Combined DF hcore component:\n%s', de_hcore)
     lib.logger.debug(mc, 'Combined DF renorm component:\n%s', de_renorm)
-    lib.logger.debug(mc, 'Combined DF eri component:\n%s', de_eri)
-    lib.logger.debug(mc, 'Combined DF aux component:\n%s', de_aux)
+    lib.logger.debug(mc, 'Combined direct DF component:\n%s', de_df)
     lib.logger.timer(mc, 'Combined DF SA-CASSCF response', *t0)
-    return de_hcore + de_renorm + de_eri + de_aux
+    return de_hcore + de_renorm + de_df
 
 def as_scanner(mcscf_grad, state=None):
     '''Generating a nuclear gradients scanner/solver (for geometry optimizer).
