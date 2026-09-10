@@ -1006,6 +1006,13 @@ class Gradients (lagrange.Gradients):
 class OPT_Gradients (Gradients):
     '''Opt-in SA-CASSCF gradients using one combined total response.'''
 
+    def get_lagrange_callback(self, Lvec_last, itvec, geff_op):
+        '''Count CG iterations without an extra Hessian-vector product.'''
+        def count_iteration(x):
+            itvec[0] += 1
+            Lvec_last[:] = x
+        return count_iteration
+
     def kernel (self, state=None, atmlst=None, verbose=None, mo=None, ci=None, eris=None,
                 mf_grad=None, e_states=None, level_shift=None, **kwargs):
         if ci is None:
