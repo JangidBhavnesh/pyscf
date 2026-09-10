@@ -394,13 +394,10 @@ def Lorb_Lci_dot_dgorb_dgci_dx (Lorb, Lci, weights, mc, mo_coeff=None, ci=None,
         aapaL[:,:,i,:] += kbuf + kbuf.transpose(1,0,2)
 
     # Generalized Fock contribution for the orbital response.
-    vj, vk = mc._scf.get_jk(mol, (dm_core, dm_cas))
-    vjL, vkL = mc._scf.get_jk(mol, (dmL_core, dmL_cas))
+    vj, vk = mc._scf.get_jk(
+        mol, (dm_core, dm_cas, dmL_core, dmL_cas, dm_cas_ci))
     h1 = mc.get_hcore()
-    vhf_c = vj[0] - vk[0] * .5
-    vhf_a = vj[1] - vk[1] * .5
-    vhfL_c = vjL[0] - vkL[0] * .5
-    vhfL_a = vjL[1] - vkL[1] * .5
+    vhf_c, vhf_a, vhfL_c, vhfL_a, vhf_a_ci = vj - vk * .5
     gfock = np.dot(h1, dm1L)
     gfock += np.dot(vhf_c + vhf_a, dmL_core)
     gfock += np.dot(vhfL_c + vhfL_a, dm_core)
@@ -416,25 +413,22 @@ def Lorb_Lci_dot_dgorb_dgci_dx (Lorb, Lci, weights, mc, mo_coeff=None, ci=None,
     dme0 = (gfock + gfock.T) / 2
 
     # Generalized Fock contribution for the CI response.
-    vj_ci, vk_ci = mc._scf.get_jk(mol, (dm_core, dm_cas_ci))
-    vhf_c_ci = vj_ci[0] - vk_ci[0] * .5
-    vhf_a_ci = vj_ci[1] - vk_ci[1] * .5
     gfock_ci = np.zeros((nmo,nmo), dtype=dm_cas_ci.dtype)
     gfock_ci[:,:nocc] = reduce(np.dot, (mo_coeff.T, vhf_a_ci,
                                         mo_coeff[:,:nocc])) * 2
-    gfock_ci[:,ncore:nocc] = reduce(np.dot, (mo_coeff.T, h1 + vhf_c_ci,
+    gfock_ci[:,ncore:nocc] = reduce(np.dot, (mo_coeff.T, h1 + vhf_c,
                                              mo_cas, casdm1_ci))
     gfock_ci[:,ncore:nocc] += np.einsum('uvpw,vuwt->pt', aapa, casdm2_ci)
     dme0_ci = reduce(np.dot, (mo_coeff, (gfock_ci + gfock_ci.T) * .5,
                                 mo_coeff.T))
-    aapa = aapaL = vj = vk = vjL = vkL = vj_ci = vk_ci = None
+    aapa = aapaL = vj = vk = None
 
-    # Keep the derivative J/K construction unchanged, but share the
-    # one-electron integral derivatives below.
-    vj, vk = mf_grad.get_jk(mol, (dm_core, dm_cas, dmL_core, dmL_cas))
-    vhf1c, vhf1a, vhf1cL, vhf1aL = vj - vk * .5
-    vj_ci, vk_ci = mf_grad.get_jk(mol, (dm_core, dm_cas_ci))
-    vhf1c_ci, vhf1a_ci = vj_ci - vk_ci * .5
+    # Batch all unique response densities so that the derivative J/K driver
+    # traverses the AO integral shell quartets once.  The core result is
+    # shared by the orbital and CI contributions.
+    vj, vk = mf_grad.get_jk(
+        mol, (dm_core, dm_cas, dmL_core, dmL_cas, dm_cas_ci))
+    vhf1c, vhf1a, vhf1cL, vhf1aL, vhf1a_ci = vj - vk * .5
     hcore_deriv = mf_grad.hcore_generator(mol)
     s1 = mf_grad.get_ovlp(mol)
     dm1_hcore = dm1L + dm_cas_ci
@@ -521,7 +515,7 @@ def Lorb_Lci_dot_dgorb_dgci_dx (Lorb, Lci, weights, mc, mo_coeff=None, ci=None,
         de_eri[k] += np.einsum('xij,ij->x', vhf1a[:,p0:p1], dmL_core[p0:p1]) * 2
         de_eri[k] += np.einsum('xij,ij->x', vhf1aL[:,p0:p1], dm_core[p0:p1]) * 2
         # CI-response derivative J/K terms.
-        de_eri[k] += np.einsum('xij,ij->x', vhf1c_ci[:,p0:p1],
+        de_eri[k] += np.einsum('xij,ij->x', vhf1c[:,p0:p1],
                                 dm_cas_ci[p0:p1]) * 2
         de_eri[k] += np.einsum('xij,ij->x', vhf1a_ci[:,p0:p1],
                                 dm_core[p0:p1]) * 2
