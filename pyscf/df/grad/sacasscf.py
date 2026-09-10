@@ -312,7 +312,7 @@ def _grad_elec_df_response_direct(mc, mf_grad, dms, pair_weights,
     '''
     mol = mc.mol
     auxmol = mc.with_df.auxmol
-    nao, nbas, naux = mol.nao, mol.nbas, auxmol.nao
+    nao, nbas = mol.nao, mol.nbas
     dms = np.asarray(dms).reshape(-1, nao, nao)
     nset = len(dms)
     pair_weights = np.asarray(pair_weights)
