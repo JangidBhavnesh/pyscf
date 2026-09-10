@@ -332,7 +332,8 @@ def Lci_dot_dgci_dx (Lci, weights, mc, mo_coeff=None, ci=None, atmlst=None, mf_g
     return de
 
 def Lorb_Lci_dot_dgorb_dgci_dx (Lorb, Lci, weights, mc, mo_coeff=None, ci=None,
-                                atmlst=None, mf_grad=None, eris=None, verbose=None):
+                                atmlst=None, mf_grad=None, eris=None, verbose=None,
+                                fcasscf=None, ci_state=None):
     '''Combined orbital and CI Lagrange contributions to the SA-CASSCF gradient.
 
     This is equivalent to::
@@ -342,7 +343,8 @@ def Lorb_Lci_dot_dgorb_dgci_dx (Lorb, Lci, weights, mc, mo_coeff=None, ci=None,
 
     The effective one- and two-particle densities are combined so that the
     one-electron derivatives and each ``int2e_ip1`` shell block are evaluated
-    only once.
+    only once.  If ``fcasscf`` and ``ci_state`` are supplied, the target-state
+    Hamiltonian response is included in the same pass.
     '''
     if mo_coeff is None: mo_coeff = mc.mo_coeff
     if ci is None: ci = mc.ci
@@ -383,7 +385,16 @@ def Lorb_Lci_dot_dgorb_dgci_dx (Lorb, Lci, weights, mc, mo_coeff=None, ci=None,
     casdm2_ci += casdm2_ci.transpose(1,0,3,2)
     dm_cas_ci = reduce(np.dot, (mo_cas, casdm1_ci, mo_cas.T))
 
-    # The (active active|orbital active) integrals are common to both parts.
+    with_ham_response = fcasscf is not None or ci_state is not None
+    if with_ham_response:
+        if fcasscf is None or ci_state is None:
+            raise ValueError('fcasscf and ci_state must be supplied together')
+        casdm1_ham, casdm2_ham = fcasscf.fcisolver.make_rdm12(
+            ci_state, ncas, fcasscf.nelecas)
+        dm_cas_ham = reduce(np.dot, (mo_cas, casdm1_ham, mo_cas.T))
+        dm1_ham = dm_core + dm_cas_ham
+
+    # The (active active|orbital active) integrals are common to all parts.
     aapa = np.asarray(eris.papa[ncore:nocc])
     aapaL = np.zeros((ncas,ncas,nmo,ncas), dtype=dm_cas.dtype)
     for i in range(nmo):
@@ -394,10 +405,13 @@ def Lorb_Lci_dot_dgorb_dgci_dx (Lorb, Lci, weights, mc, mo_coeff=None, ci=None,
         aapaL[:,:,i,:] += kbuf + kbuf.transpose(1,0,2)
 
     # Generalized Fock contribution for the orbital response.
-    vj, vk = mc._scf.get_jk(
-        mol, (dm_core, dm_cas, dmL_core, dmL_cas, dm_cas_ci))
+    jk_dms = (dm_core, dm_cas, dmL_core, dmL_cas, dm_cas_ci)
+    if with_ham_response:
+        jk_dms += (dm_cas_ham,)
+    vj, vk = mc._scf.get_jk(mol, jk_dms)
     h1 = mc.get_hcore()
-    vhf_c, vhf_a, vhfL_c, vhfL_a, vhf_a_ci = vj - vk * .5
+    vhf = vj - vk * .5
+    vhf_c, vhf_a, vhfL_c, vhfL_a, vhf_a_ci = vhf[:5]
     gfock = np.dot(h1, dm1L)
     gfock += np.dot(vhf_c + vhf_a, dmL_core)
     gfock += np.dot(vhfL_c + vhfL_a, dm_core)
@@ -421,18 +435,34 @@ def Lorb_Lci_dot_dgorb_dgci_dx (Lorb, Lci, weights, mc, mo_coeff=None, ci=None,
     gfock_ci[:,ncore:nocc] += np.einsum('uvpw,vuwt->pt', aapa, casdm2_ci)
     dme0_ci = reduce(np.dot, (mo_coeff, (gfock_ci + gfock_ci.T) * .5,
                                 mo_coeff.T))
+
+    if with_ham_response:
+        vhf_a_ham = vhf[5]
+        gfock_ham = np.zeros((nmo,nmo), dtype=dm_cas_ham.dtype)
+        gfock_ham[:,:ncore] = reduce(
+            np.dot, (mo_coeff.T, h1 + vhf_c + vhf_a_ham, mo_core)) * 2
+        gfock_ham[:,ncore:nocc] = reduce(
+            np.dot, (mo_coeff.T, h1 + vhf_c, mo_cas, casdm1_ham))
+        gfock_ham[:,ncore:nocc] += np.einsum(
+            'uviw,vuwt->it', aapa, casdm2_ham)
+        dme0_ham = reduce(
+            np.dot, (mo_coeff, (gfock_ham + gfock_ham.T) * .5, mo_coeff.T))
     aapa = aapaL = vj = vk = None
 
     # Batch all unique response densities so that the derivative J/K driver
     # traverses the AO integral shell quartets once.  The core result is
     # shared by the orbital and CI contributions.
-    vj, vk = mf_grad.get_jk(
-        mol, (dm_core, dm_cas, dmL_core, dmL_cas, dm_cas_ci))
-    vhf1c, vhf1a, vhf1cL, vhf1aL, vhf1a_ci = vj - vk * .5
+    vj, vk = mf_grad.get_jk(mol, jk_dms)
+    vhf1 = vj - vk * .5
+    vhf1c, vhf1a, vhf1cL, vhf1aL, vhf1a_ci = vhf1[:5]
     hcore_deriv = mf_grad.hcore_generator(mol)
     s1 = mf_grad.get_ovlp(mol)
     dm1_hcore = dm1L + dm_cas_ci
     dme0_total = dme0 + dme0_ci
+    if with_ham_response:
+        vhf1a_ham = vhf1[5]
+        dm1_hcore += dm1_ham
+        dme0_total += dme0_ham
 
     diag_idx = np.arange(nao)
     diag_idx = diag_idx * (diag_idx+1) // 2 + diag_idx
@@ -469,6 +499,16 @@ def Lorb_Lci_dot_dgorb_dgci_dx (Lorb, Lci, weights, mc, mo_coeff=None, ci=None,
     dm2buf_ci = dm2buf_ci.reshape(ncas,ncas,nao_pair)
     dm2Lbuf += dm2buf_ci
     dm2buf_ci = None
+    if with_ham_response:
+        casdm2_ham_cc = casdm2_ham + casdm2_ham.transpose(0,1,3,2)
+        dm2buf_ham = ao2mo._ao2mo.nr_e2(
+            casdm2_ham_cc.reshape(ncas**2,ncas**2), mo_cas.T,
+            (0, nao, 0, nao)).reshape(ncas**2,nao,nao)
+        dm2buf_ham = lib.pack_tril(dm2buf_ham)
+        dm2buf_ham[:,diag_idx] *= .5
+        dm2buf_ham = dm2buf_ham.reshape(ncas,ncas,nao_pair)
+        dm2Lbuf += dm2buf_ham
+        dm2buf_ham = None
 
     if atmlst is None:
         atmlst = list(range(mol.natm))
@@ -481,9 +521,9 @@ def Lorb_Lci_dot_dgorb_dgci_dx (Lorb, Lci, weights, mc, mo_coeff=None, ci=None,
     blksize = int(max_memory*.9e6/8 /
                   (4*(aoslices[:,3]-aoslices[:,2]).max()*nao_pair))
     blksize = min(nao, max(2, blksize))
-    logger.info(mc, 'Combined SA-CASSCF Lorb/Lci memory remaining for eri manipulation: '
+    logger.info(mc, 'Combined SA-CASSCF response memory remaining for eri manipulation: '
                 '%f MB; using blocksize = %d', max_memory, blksize)
-    t0 = logger.timer(mc, 'Combined SA-CASSCF Lorb/Lci 1-electron part', *t0)
+    t0 = logger.timer(mc, 'Combined SA-CASSCF response 1-electron part', *t0)
 
     for k, ia in enumerate(atmlst):
         shl0, shl1, p0, p1 = aoslices[ia]
@@ -506,7 +546,7 @@ def Lorb_Lci_dot_dgorb_dgci_dx (Lorb, Lci, weights, mc, mo_coeff=None, ci=None,
                              shls_slice=shls_slice).reshape(3,p1-p0,nf,nao_pair)
             de_eri[k] -= np.einsum('xijw,ijw->x', eri1, dm2_ao) * 2
             eri1 = dm2_ao = None
-            t0 = logger.timer(mc, 'Combined SA-CASSCF Lorb/Lci atom {} ({},{}|{})'.format(
+            t0 = logger.timer(mc, 'Combined SA-CASSCF response atom {} ({},{}|{})'.format(
                 ia, p1-p0, nf, nao_pair), *t0)
 
         # Orbital-response derivative J/K terms.
@@ -519,7 +559,12 @@ def Lorb_Lci_dot_dgorb_dgci_dx (Lorb, Lci, weights, mc, mo_coeff=None, ci=None,
                                 dm_cas_ci[p0:p1]) * 2
         de_eri[k] += np.einsum('xij,ij->x', vhf1a_ci[:,p0:p1],
                                 dm_core[p0:p1]) * 2
-
+        if with_ham_response:
+            # Target-state Hamiltonian-response derivative J/K terms.
+            de_eri[k] += np.einsum('xij,ij->x', vhf1c[:,p0:p1],
+                                    dm1_ham[p0:p1]) * 2
+            de_eri[k] += np.einsum('xij,ij->x', vhf1a_ham[:,p0:p1],
+                                    dm_core[p0:p1]) * 2
     logger.debug(mc, 'Combined Lagrange hcore component:\n{}'.format(de_hcore))
     logger.debug(mc, 'Combined Lagrange renorm component:\n{}'.format(de_renorm))
     logger.debug(mc, 'Combined Lagrange eri component:\n{}'.format(de_eri))
@@ -959,7 +1004,69 @@ class Gradients (lagrange.Gradients):
     as_scanner = as_scanner
 
 class OPT_Gradients (Gradients):
-    '''Opt-in SA-CASSCF gradients using the combined orbital/CI response.'''
+    '''Opt-in SA-CASSCF gradients using one combined total response.'''
+
+    def kernel (self, state=None, atmlst=None, verbose=None, mo=None, ci=None, eris=None,
+                mf_grad=None, e_states=None, level_shift=None, **kwargs):
+        if ci is None:
+            if self.base.ci is None:
+                self.base.run()
+            ci = self.base.ci
+        if state is None: state = self.state
+        if atmlst is None: atmlst = self.atmlst
+        if verbose is None: verbose = self.verbose
+        if mo is None: mo = self.base.mo_coeff
+        if state is None:
+            return super().kernel(
+                state=state, atmlst=atmlst, verbose=verbose, mo=mo, ci=ci,
+                eris=eris, mf_grad=mf_grad, e_states=e_states,
+                level_shift=level_shift, **kwargs)
+        if eris is None:
+            eris = self.eris = self.base.ao2mo(mo)
+        if mf_grad is None:
+            mf_grad = self.base._scf.nuc_grad_method()
+        if e_states is None:
+            try:
+                e_states = self.e_states = np.asarray(self.base.e_states)
+            except AttributeError:
+                e_states = self.e_states = np.asarray(self.base.e_tot)
+        if level_shift is None: level_shift = self.level_shift
+
+        cput0 = (logger.process_clock(), logger.perf_counter())
+        log = logger.new_logger(self, verbose)
+        self.atmlst = atmlst
+        if self.verbose >= logger.WARN:
+            self.check_sanity()
+        if self.verbose >= logger.INFO:
+            self.dump_flags()
+
+        response_kwargs = dict(
+            state=state, atmlst=atmlst, verbose=verbose, mo=mo, ci=ci,
+            eris=eris, mf_grad=mf_grad, e_states=e_states, **kwargs)
+        self.converged, self.Lvec, bvec, Aop, Adiag = self.solve_lagrange(
+            level_shift=level_shift, **response_kwargs)
+        if self.verbose >= logger.INFO:
+            self.debug_lagrange(self.Lvec, bvec, Aop, Adiag, **response_kwargs)
+
+        Lorb, Lci = self.unpack_uniq_var(self.Lvec)
+        fcasscf = self.make_fcasscf(state)
+        fcasscf.mo_coeff = mo
+        fcasscf.ci = ci[state]
+
+        # Original two-stage response evaluation:
+        # ham_response = self.get_ham_response(**response_kwargs)
+        # LdotJnuc = self.get_LdotJnuc(self.Lvec, **response_kwargs)
+        # self.de = ham_response + LdotJnuc
+        self.de = Lorb_Lci_dot_dgorb_dgci_dx(
+            Lorb, Lci, self.weights, self.base, mo_coeff=mo, ci=ci,
+            atmlst=atmlst, mf_grad=mf_grad, eris=eris, verbose=verbose,
+            fcasscf=fcasscf, ci_state=ci[state])
+        self.de += self.grad_nuc(atmlst=atmlst)
+        if self.mol.symmetry:
+            self.de = self.symmetrize(self.de, atmlst)
+        log.timer('Optimized SA-CASSCF Lagrange gradients', *cput0)
+        self._finalize()
+        return self.de
 
     def get_LdotJnuc (self, Lvec, state=None, atmlst=None, verbose=None, mo=None, ci=None,
                       eris=None, mf_grad=None, **kwargs):
