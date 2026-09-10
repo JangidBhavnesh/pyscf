@@ -331,6 +331,206 @@ def Lci_dot_dgci_dx (Lci, weights, mc, mo_coeff=None, ci=None, atmlst=None, mf_g
     de = de_hcore + de_renorm + de_eri
     return de
 
+def Lorb_Lci_dot_dgorb_dgci_dx (Lorb, Lci, weights, mc, mo_coeff=None, ci=None,
+                                atmlst=None, mf_grad=None, eris=None, verbose=None):
+    '''Combined orbital and CI Lagrange contributions to the SA-CASSCF gradient.
+
+    This is equivalent to::
+
+        Lorb_dot_dgorb_dx(Lorb, mc, ...) +
+        Lci_dot_dgci_dx(Lci, weights, mc, ...)
+
+    The effective one- and two-particle densities are combined so that the
+    one-electron derivatives and each ``int2e_ip1`` shell block are evaluated
+    only once.
+    '''
+    if mo_coeff is None: mo_coeff = mc.mo_coeff
+    if ci is None: ci = mc.ci
+    if mf_grad is None: mf_grad = mc._scf.nuc_grad_method()
+    if mc.frozen is not None:
+        raise NotImplementedError
+
+    t0 = (logger.process_clock(), logger.perf_counter())
+    mol = mc.mol
+    ncore = mc.ncore
+    ncas = mc.ncas
+    nocc = ncore + ncas
+    nelecas = mc.nelecas
+    nao, nmo = mo_coeff.shape
+    nao_pair = nao * (nao+1) // 2
+
+    mo_core = mo_coeff[:,:ncore]
+    mo_cas = mo_coeff[:,ncore:nocc]
+    moL_coeff = np.dot(mo_coeff, Lorb)
+    moL_core = moL_coeff[:,:ncore]
+    moL_cas = moL_coeff[:,ncore:nocc]
+    s0_inv = np.dot(mo_coeff, mo_coeff.T)
+
+    # Orbital response densities are state averaged.
+    casdm1, casdm2 = mc.fcisolver.make_rdm12(ci, ncas, nelecas)
+    dm_core = np.dot(mo_core, mo_core.T) * 2
+    dm_cas = reduce(np.dot, (mo_cas, casdm1, mo_cas.T))
+    dmL_core = np.dot(moL_core, mo_core.T) * 2
+    dmL_cas = reduce(np.dot, (moL_cas, casdm1, mo_cas.T))
+    dmL_core += dmL_core.T
+    dmL_cas += dmL_cas.T
+    dm1 = dm_core + dm_cas
+    dm1L = dmL_core + dmL_cas
+
+    # CI response densities are transition densities plus their transposes.
+    casdm1_ci, casdm2_ci = mc.fcisolver.trans_rdm12(Lci, ci, ncas, nelecas)
+    casdm1_ci += casdm1_ci.transpose(1,0)
+    casdm2_ci += casdm2_ci.transpose(1,0,3,2)
+    dm_cas_ci = reduce(np.dot, (mo_cas, casdm1_ci, mo_cas.T))
+
+    # The (active active|orbital active) integrals are common to both parts.
+    aapa = np.asarray(eris.papa[ncore:nocc])
+    aapaL = np.zeros((ncas,ncas,nmo,ncas), dtype=dm_cas.dtype)
+    for i in range(nmo):
+        jbuf = eris.ppaa[i]
+        kbuf = eris.papa[i]
+        aapaL[:,:,i,:] += np.tensordot(jbuf, Lorb[:,ncore:nocc], axes=((0),(0)))
+        kbuf = np.tensordot(kbuf, Lorb[:,ncore:nocc], axes=((1),(0))).transpose(1,2,0)
+        aapaL[:,:,i,:] += kbuf + kbuf.transpose(1,0,2)
+
+    # Generalized Fock contribution for the orbital response.
+    vj, vk = mc._scf.get_jk(mol, (dm_core, dm_cas))
+    vjL, vkL = mc._scf.get_jk(mol, (dmL_core, dmL_cas))
+    h1 = mc.get_hcore()
+    vhf_c = vj[0] - vk[0] * .5
+    vhf_a = vj[1] - vk[1] * .5
+    vhfL_c = vjL[0] - vkL[0] * .5
+    vhfL_a = vjL[1] - vkL[1] * .5
+    gfock = np.dot(h1, dm1L)
+    gfock += np.dot(vhf_c + vhf_a, dmL_core)
+    gfock += np.dot(vhfL_c + vhfL_a, dm_core)
+    gfock += np.dot(vhfL_c, dm_cas)
+    gfock += np.dot(vhf_c, dmL_cas)
+    gfock = np.dot(s0_inv, gfock)
+    gfock += reduce(np.dot, (mo_coeff,
+                             np.einsum('uviw,uvtw->it', aapaL, casdm2),
+                             mo_cas.T))
+    gfock += reduce(np.dot, (mo_coeff,
+                             np.einsum('uviw,vuwt->it', aapa, casdm2),
+                             moL_cas.T))
+    dme0 = (gfock + gfock.T) / 2
+
+    # Generalized Fock contribution for the CI response.
+    vj_ci, vk_ci = mc._scf.get_jk(mol, (dm_core, dm_cas_ci))
+    vhf_c_ci = vj_ci[0] - vk_ci[0] * .5
+    vhf_a_ci = vj_ci[1] - vk_ci[1] * .5
+    gfock_ci = np.zeros((nmo,nmo), dtype=dm_cas_ci.dtype)
+    gfock_ci[:,:nocc] = reduce(np.dot, (mo_coeff.T, vhf_a_ci,
+                                        mo_coeff[:,:nocc])) * 2
+    gfock_ci[:,ncore:nocc] = reduce(np.dot, (mo_coeff.T, h1 + vhf_c_ci,
+                                             mo_cas, casdm1_ci))
+    gfock_ci[:,ncore:nocc] += np.einsum('uvpw,vuwt->pt', aapa, casdm2_ci)
+    dme0_ci = reduce(np.dot, (mo_coeff, (gfock_ci + gfock_ci.T) * .5,
+                                mo_coeff.T))
+    aapa = aapaL = vj = vk = vjL = vkL = vj_ci = vk_ci = None
+
+    # Keep the derivative J/K construction unchanged, but share the
+    # one-electron integral derivatives below.
+    vj, vk = mf_grad.get_jk(mol, (dm_core, dm_cas, dmL_core, dmL_cas))
+    vhf1c, vhf1a, vhf1cL, vhf1aL = vj - vk * .5
+    vj_ci, vk_ci = mf_grad.get_jk(mol, (dm_core, dm_cas_ci))
+    vhf1c_ci, vhf1a_ci = vj_ci - vk_ci * .5
+    hcore_deriv = mf_grad.hcore_generator(mol)
+    s1 = mf_grad.get_ovlp(mol)
+    dm1_hcore = dm1L + dm_cas_ci
+    dme0_total = dme0 + dme0_ci
+
+    diag_idx = np.arange(nao)
+    diag_idx = diag_idx * (diag_idx+1) // 2 + diag_idx
+
+    # Orbital two-particle density buffers.
+    casdm2_cc = casdm2 + casdm2.transpose(0,1,3,2)
+    dm2buf = ao2mo._ao2mo.nr_e2(casdm2_cc.reshape(ncas**2,ncas**2), mo_cas.T,
+                                (0, nao, 0, nao)).reshape(ncas**2,nao,nao)
+    dm2Lbuf = np.zeros((ncas**2,nmo,nmo))
+    Lcasdm2 = np.tensordot(Lorb[:,ncore:nocc], casdm2,
+                           axes=(1,2)).transpose(1,2,0,3)
+    dm2Lbuf[:,:,ncore:nocc] = Lcasdm2.reshape(ncas**2,nmo,ncas)
+    Lcasdm2 = np.tensordot(Lorb[:,ncore:nocc], casdm2,
+                           axes=(1,3)).transpose(1,2,3,0)
+    dm2Lbuf[:,ncore:nocc,:] += Lcasdm2.reshape(ncas**2,ncas,nmo)
+    dm2Lbuf += dm2Lbuf.transpose(0,2,1)
+    dm2Lbuf = np.ascontiguousarray(dm2Lbuf)
+    dm2Lbuf = ao2mo._ao2mo.nr_e2(dm2Lbuf.reshape(ncas**2,nmo**2), mo_coeff.T,
+                                 (0, nao, 0, nao)).reshape(ncas**2,nao,nao)
+    dm2buf = lib.pack_tril(dm2buf)
+    dm2buf[:,diag_idx] *= .5
+    dm2buf = dm2buf.reshape(ncas,ncas,nao_pair)
+    dm2Lbuf = lib.pack_tril(dm2Lbuf)
+    dm2Lbuf[:,diag_idx] *= .5
+    dm2Lbuf = dm2Lbuf.reshape(ncas,ncas,nao_pair)
+
+    # The CI buffer has the same MO contractions as dm2Lbuf, so combine
+    # them before entering the derivative-integral loop.
+    casdm2_ci_cc = casdm2_ci + casdm2_ci.transpose(0,1,3,2)
+    dm2buf_ci = ao2mo._ao2mo.nr_e2(casdm2_ci_cc.reshape(ncas**2,ncas**2), mo_cas.T,
+                                   (0, nao, 0, nao)).reshape(ncas**2,nao,nao)
+    dm2buf_ci = lib.pack_tril(dm2buf_ci)
+    dm2buf_ci[:,diag_idx] *= .5
+    dm2buf_ci = dm2buf_ci.reshape(ncas,ncas,nao_pair)
+    dm2Lbuf += dm2buf_ci
+    dm2buf_ci = None
+
+    if atmlst is None:
+        atmlst = list(range(mol.natm))
+    aoslices = mol.aoslice_by_atom()
+    de_hcore = np.zeros((len(atmlst),3))
+    de_renorm = np.zeros((len(atmlst),3))
+    de_eri = np.zeros((len(atmlst),3))
+
+    max_memory = mc.max_memory - lib.current_memory()[0]
+    blksize = int(max_memory*.9e6/8 /
+                  (4*(aoslices[:,3]-aoslices[:,2]).max()*nao_pair))
+    blksize = min(nao, max(2, blksize))
+    logger.info(mc, 'Combined SA-CASSCF Lorb/Lci memory remaining for eri manipulation: '
+                '%f MB; using blocksize = %d', max_memory, blksize)
+    t0 = logger.timer(mc, 'Combined SA-CASSCF Lorb/Lci 1-electron part', *t0)
+
+    for k, ia in enumerate(atmlst):
+        shl0, shl1, p0, p1 = aoslices[ia]
+        h1ao = hcore_deriv(ia)
+        de_hcore[k] += np.einsum('xij,ij->x', h1ao, dm1_hcore)
+        de_renorm[k] -= np.einsum('xij,ij->x', s1[:,p0:p1],
+                                   dme0_total[p0:p1]) * 2
+
+        q1 = 0
+        for b0, b1, nf in _shell_prange(mol, 0, mol.nbas, blksize):
+            q0, q1 = q1, q1 + nf
+            dm2_ao = lib.einsum('ijw,pi,qj->pqw', dm2Lbuf,
+                                 mo_cas[p0:p1], mo_cas[q0:q1])
+            dm2_ao += lib.einsum('ijw,pi,qj->pqw', dm2buf,
+                                  moL_cas[p0:p1], mo_cas[q0:q1])
+            dm2_ao += lib.einsum('ijw,pi,qj->pqw', dm2buf,
+                                  mo_cas[p0:p1], moL_cas[q0:q1])
+            shls_slice = (shl0,shl1,b0,b1,0,mol.nbas,0,mol.nbas)
+            eri1 = mol.intor('int2e_ip1', comp=3, aosym='s2kl',
+                             shls_slice=shls_slice).reshape(3,p1-p0,nf,nao_pair)
+            de_eri[k] -= np.einsum('xijw,ijw->x', eri1, dm2_ao) * 2
+            eri1 = dm2_ao = None
+            t0 = logger.timer(mc, 'Combined SA-CASSCF Lorb/Lci atom {} ({},{}|{})'.format(
+                ia, p1-p0, nf, nao_pair), *t0)
+
+        # Orbital-response derivative J/K terms.
+        de_eri[k] += np.einsum('xij,ij->x', vhf1c[:,p0:p1], dm1L[p0:p1]) * 2
+        de_eri[k] += np.einsum('xij,ij->x', vhf1cL[:,p0:p1], dm1[p0:p1]) * 2
+        de_eri[k] += np.einsum('xij,ij->x', vhf1a[:,p0:p1], dmL_core[p0:p1]) * 2
+        de_eri[k] += np.einsum('xij,ij->x', vhf1aL[:,p0:p1], dm_core[p0:p1]) * 2
+        # CI-response derivative J/K terms.
+        de_eri[k] += np.einsum('xij,ij->x', vhf1c_ci[:,p0:p1],
+                                dm_cas_ci[p0:p1]) * 2
+        de_eri[k] += np.einsum('xij,ij->x', vhf1a_ci[:,p0:p1],
+                                dm_core[p0:p1]) * 2
+
+    logger.debug(mc, 'Combined Lagrange hcore component:\n{}'.format(de_hcore))
+    logger.debug(mc, 'Combined Lagrange renorm component:\n{}'.format(de_renorm))
+    logger.debug(mc, 'Combined Lagrange eri component:\n{}'.format(de_eri))
+    return de_hcore + de_renorm + de_eri
+
 def as_scanner(mcscf_grad, state=None):
     '''Generating a nuclear gradients scanner/solver (for geometry optimizer).
 
@@ -763,6 +963,46 @@ class Gradients (lagrange.Gradients):
         return my_Aop
 
     as_scanner = as_scanner
+
+class OPT_Gradients (Gradients):
+    '''Opt-in SA-CASSCF gradients using the combined orbital/CI response.'''
+
+    def get_LdotJnuc (self, Lvec, state=None, atmlst=None, verbose=None, mo=None, ci=None,
+                      eris=None, mf_grad=None, **kwargs):
+        if state is None: state = self.state
+        if atmlst is None: atmlst = self.atmlst
+        if verbose is None: verbose = self.verbose
+        if mo is None: mo = self.base.mo_coeff
+        if ci is None: ci = self.base.ci[state]
+        if eris is None and self.eris is None:
+            eris = self.eris = self.base.ao2mo (mo)
+        elif eris is None:
+            eris = self.eris
+
+        Lorb, Lci = self.unpack_uniq_var (Lvec)
+
+        # Original separate response evaluations:
+        # de_Lci = Lci_dot_dgci_dx(Lci, self.weights, self.base, mo_coeff=mo, ci=ci,
+        #                          atmlst=atmlst, mf_grad=mf_grad, eris=eris,
+        #                          verbose=verbose)
+        # de_Lorb = Lorb_dot_dgorb_dx(Lorb, self.base, mo_coeff=mo, ci=ci,
+        #                             atmlst=atmlst, mf_grad=mf_grad, eris=eris,
+        #                             verbose=verbose)
+        # return de_Lci + de_Lorb
+
+        t0 = (logger.process_clock(), logger.perf_counter())
+        de = Lorb_Lci_dot_dgorb_dgci_dx(
+            Lorb, Lci, self.weights, self.base, mo_coeff=mo, ci=ci,
+            atmlst=atmlst, mf_grad=mf_grad, eris=eris, verbose=verbose)
+        logger.info (self,
+                     '--------------- %s gradient combined Lagrange response ---------------',
+                     self.base.__class__.__name__)
+        if verbose >= logger.INFO: rhf_grad._write(self, self.mol, de, atmlst)
+        logger.info (self,
+                     '---------------------------------------------------------------------------')
+        logger.timer (self, '{} gradient combined Lagrange response'.format(
+            self.base.__class__.__name__), *t0)
+        return de
 
 class SACASLagPrec (lagrange.LagPrec):
     ''' A callable preconditioner for solving the Lagrange equations.
