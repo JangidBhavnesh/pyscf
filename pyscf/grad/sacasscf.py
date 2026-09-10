@@ -1003,15 +1003,118 @@ class Gradients (lagrange.Gradients):
 
     as_scanner = as_scanner
 
+def _cg_with_residual(Aop, bvec, x0, precond, tol, atol, maxiter,
+                      callback=None):
+    '''Preconditioned CG whose callback receives the current residual.'''
+    x = np.array(x0, copy=True)
+    rhs = np.asarray(bvec)
+    conv_tol = max(float(atol), float(tol) * linalg.norm(rhs))
+    residual = rhs - Aop(x)
+    search = None
+    rz_last = None
+
+    for _ in range(maxiter):
+        if linalg.norm(residual) < conv_tol:
+            return x, 0, residual
+        zvec = np.asarray(precond(residual))
+        rz = np.vdot(residual, zvec)
+        if search is None:
+            search = zvec.copy()
+        else:
+            search *= rz / rz_last
+            search += zvec
+        hsearch = Aop(search)
+        curvature = np.vdot(search, hsearch)
+        if curvature == 0:
+            return x, -1, residual
+        alpha = rz / curvature
+        x += alpha * search
+        residual -= alpha * hsearch
+        rz_last = rz
+        if callback is not None:
+            callback(x, residual)
+    if linalg.norm(residual) < conv_tol:
+        return x, 0, residual
+    return x, maxiter, residual
+
+
 class OPT_Gradients (Gradients):
     '''Opt-in SA-CASSCF gradients using one combined total response.'''
 
+    _keys = Gradients._keys | {
+        'lagrange_iterations',
+        'lagrange_hop_setup', 'lagrange_hop_solve',
+        'lagrange_hop_validation', 'lagrange_hop_total',
+    }
+
     def get_lagrange_callback(self, Lvec_last, itvec, geff_op):
-        '''Count CG iterations without an extra Hessian-vector product.'''
-        def count_iteration(x):
+        '''Log the available CG residual without another Hessian product.'''
+        def log_iteration(x, residual):
             itvec[0] += 1
+            geff = -residual
+            deltax = x - Lvec_last
+            gorb, gci = self.unpack_uniq_var(geff)
+            Lorb, Lci = self.unpack_uniq_var(x)
+            deltaorb, deltaci = self.unpack_uniq_var(deltax)
+            gci = np.concatenate([g.ravel() for g in gci])
+            Lci = np.concatenate([c.ravel() for c in Lci])
+            deltaci = np.concatenate([d.ravel() for d in deltaci])
+            logger.info(
+                self,
+                ('Lagrange optimization iteration %d, |gorb| = %g, |gci| = %g, '
+                 '|Lorb| = %g, |Lci| = %g, |dLorb| = %g, |dLci| = %g'),
+                itvec[0], linalg.norm(gorb), linalg.norm(gci),
+                linalg.norm(Lorb), linalg.norm(Lci),
+                linalg.norm(deltaorb), linalg.norm(deltaci))
             Lvec_last[:] = x
-        return count_iteration
+        return log_iteration
+
+    def solve_lagrange(self, Lvec_guess=None, level_shift=None, **kwargs):
+        '''Solve the response and report iterations without logger Hx calls.'''
+        bvec = self.get_wfn_response(**kwargs)
+        raw_Aop, Adiag = self.get_Aop_Adiag(**kwargs)
+        hop_count = [0]
+
+        def Aop(x):
+            hop_count[0] += 1
+            return raw_Aop(x)
+
+        Lvec_last = np.zeros_like(bvec)
+        precond = self.get_lagrange_precond(
+            Adiag, level_shift=level_shift, **kwargs)
+        self.lagrange_hop_setup = hop_count[0]
+        it = np.asarray([0])
+        logger.debug(self, 'Lagrange multiplier determination initial gradient norm: %.8g',
+                     linalg.norm(bvec))
+        callback = self.get_lagrange_callback(Lvec_last, it, None)
+        if Lvec_guess is None:
+            Lvec_guess = self.get_init_guess(bvec, Adiag, Aop, precond)
+
+        solve_start = hop_count[0]
+        Lvec, info_int, recursive_residual = _cg_with_residual(
+            Aop, -bvec, Lvec_guess, precond, self.conv_rtol,
+            self.conv_atol, self.max_cycle, callback=callback)
+        self.lagrange_hop_solve = hop_count[0] - solve_start
+
+        validation_start = hop_count[0]
+        geff = bvec + Aop(Lvec)
+        self.lagrange_hop_validation = hop_count[0] - validation_start
+        self.lagrange_hop_total = hop_count[0]
+        self.lagrange_iterations = int(it[0])
+        logger.debug(self, 'Lagrange recursive/exact residual difference: %.8g',
+                     linalg.norm(geff + recursive_residual))
+        logger.info(
+            self,
+            ('Lagrange multiplier determination %s after %d iterations\n'
+             '   |geff| = %s, |Lvec| = %s\n'
+             '   Hessian products: setup %d, solve %d, validation %d, total %d'),
+            'converged' if info_int == 0 else 'not converged',
+            it[0], linalg.norm(geff), linalg.norm(Lvec),
+            self.lagrange_hop_setup, self.lagrange_hop_solve,
+            self.lagrange_hop_validation, self.lagrange_hop_total)
+        if info_int < 0:
+            logger.info(self, 'Lagrange multiplier determination error code %s', info_int)
+        return (info_int == 0), Lvec, bvec, raw_Aop, Adiag
 
     def kernel (self, state=None, atmlst=None, verbose=None, mo=None, ci=None, eris=None,
                 mf_grad=None, e_states=None, level_shift=None, **kwargs):

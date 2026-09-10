@@ -786,7 +786,13 @@ class Gradients (sacasscf_grad.Gradients):
 class OPT_Gradients(Gradients):
     '''Opt-in DF SA-CASSCF gradients using one combined total response.'''
 
+    _keys = Gradients._keys | {
+        'lagrange_iterations',
+        'lagrange_hop_setup', 'lagrange_hop_solve',
+        'lagrange_hop_validation', 'lagrange_hop_total',
+    }
     get_lagrange_callback = sacasscf_grad.OPT_Gradients.get_lagrange_callback
+    solve_lagrange = sacasscf_grad.OPT_Gradients.solve_lagrange
 
     def kernel(self, state=None, atmlst=None, verbose=None, mo=None, ci=None,
                eris=None, mf_grad=None, e_states=None, level_shift=None,
