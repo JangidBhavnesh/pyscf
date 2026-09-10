@@ -1003,15 +1003,152 @@ class Gradients (lagrange.Gradients):
 
     as_scanner = as_scanner
 
+def _cg_with_residual(Aop, bvec, x0, precond, tol, atol, maxiter,
+                      callback=None, residual0=None):
+    '''Preconditioned CG variant whose callback receives the current residual.'''
+    x = np.array(x0, copy=True)
+    rhs = np.asarray(bvec)
+    conv_tol = max(float(atol), float(tol) * linalg.norm(rhs))
+    if residual0 is None:
+        residual = rhs - Aop(x)
+    else:
+        residual = np.array(residual0, copy=True)
+    search = None
+    rz_last = None
+
+    for _ in range(maxiter):
+        if linalg.norm(residual) < conv_tol:
+            return x, 0, residual
+        zvec = np.asarray(precond(residual))
+        rz = np.vdot(residual, zvec)
+        if search is None:
+            search = zvec.copy()
+        else:
+            search *= rz / rz_last
+            search += zvec
+        hsearch = Aop(search)
+        curvature = np.vdot(search, hsearch)
+        if curvature == 0:
+            return x, -1, residual
+        alpha = rz / curvature
+        x += alpha * search
+        residual -= alpha * hsearch
+        rz_last = rz
+        if callback is not None:
+            callback(x, residual)
+    if linalg.norm(residual) < conv_tol:
+        return x, 0, residual
+    return x, maxiter, residual
+
+
 class OPT_Gradients (Gradients):
     '''Opt-in SA-CASSCF gradients using one combined total response.'''
 
+    _keys = Gradients._keys | {
+        'pspace_size', 'pspace_shift', 'pspace_min_nlag',
+        'lagrange_iterations',
+        'lagrange_hop_setup', 'lagrange_hop_solve',
+        'lagrange_hop_validation', 'lagrange_hop_total',
+    }
+    pspace_size = 8
+    pspace_shift = 1e-8
+    pspace_min_nlag = 1000
+
     def get_lagrange_callback(self, Lvec_last, itvec, geff_op):
-        '''Count CG iterations without an extra Hessian-vector product.'''
-        def count_iteration(x):
+        '''Log the CG residual already available without another Hx call.'''
+        def log_iteration(x, residual):
             itvec[0] += 1
+            geff = -residual
+            deltax = x - Lvec_last
+            gorb, gci = self.unpack_uniq_var(geff)
+            Lorb, Lci = self.unpack_uniq_var(x)
+            deltaorb, deltaci = self.unpack_uniq_var(deltax)
+            gci = np.concatenate([g.ravel() for g in gci])
+            Lci = np.concatenate([c.ravel() for c in Lci])
+            deltaci = np.concatenate([d.ravel() for d in deltaci])
+            logger.info(
+                self,
+                ('Lagrange optimization iteration %d, |gorb| = %g, |gci| = %g, '
+                 '|Lorb| = %g, |Lci| = %g, |dLorb| = %g, |dLci| = %g'),
+                itvec[0], linalg.norm(gorb), linalg.norm(gci),
+                linalg.norm(Lorb), linalg.norm(Lci),
+                linalg.norm(deltaorb), linalg.norm(deltaci))
             Lvec_last[:] = x
-        return count_iteration
+        return log_iteration
+
+    def get_lagrange_precond(self, Adiag, level_shift=None, ci=None,
+                             Aop=None, bvec=None, **kwargs):
+        base_prec = Gradients.get_lagrange_precond(
+            self, Adiag, level_shift=level_shift, ci=ci, **kwargs)
+        pspace_size = int(getattr(self, 'pspace_size', 8))
+        if pspace_size <= 0:
+            return base_prec
+        pspace_min_nlag = int(getattr(self, 'pspace_min_nlag', 1000))
+        if self.nlag < pspace_min_nlag:
+            logger.info(
+                self, 'CoupledPspPred disabled for response dimension %d (< %d)',
+                self.nlag, pspace_min_nlag)
+            return base_prec
+        if pspace_size > 16:
+            raise ValueError('CoupledPspPred pspace_size must be between 0 and 16')
+        if Aop is None or bvec is None:
+            raise ValueError('CoupledPspPred requires Aop and bvec')
+        return CoupledPspPred(
+            Aop, Adiag, bvec, base_prec, self,
+            pspace_size=pspace_size,
+            pspace_shift=getattr(self, 'pspace_shift', 1e-8))
+
+    def solve_lagrange(self, Lvec_guess=None, level_shift=None, **kwargs):
+        '''Solve with a fixed coupled P-space preconditioner and count Hx calls.'''
+        bvec = self.get_wfn_response(**kwargs)
+        raw_Aop, Adiag = self.get_Aop_Adiag(**kwargs)
+        hop_count = [0]
+
+        def Aop(x):
+            hop_count[0] += 1
+            return raw_Aop(x)
+
+        def geff_op(x):
+            return bvec + Aop(x)
+
+        Lvec_last = np.zeros_like(bvec)
+        precond = self.get_lagrange_precond(
+            Adiag, level_shift=level_shift, Aop=Aop, bvec=bvec, **kwargs)
+        self.lagrange_hop_setup = hop_count[0]
+        it = np.asarray([0])
+        logger.debug(self, 'Lagrange multiplier determination initial gradient norm: %.8g',
+                     linalg.norm(bvec))
+        callback = self.get_lagrange_callback(Lvec_last, it, geff_op)
+        initial_residual = None
+        if Lvec_guess is None:
+            if hasattr(precond, 'initial_guess'):
+                Lvec_guess = precond.initial_guess.copy()
+                initial_residual = precond.initial_residual.copy()
+            else:
+                Lvec_guess = self.get_init_guess(bvec, Adiag, Aop, precond)
+        solve_start = hop_count[0]
+        Lvec, info_int, recursive_residual = _cg_with_residual(
+            Aop, -bvec, Lvec_guess, precond, self.conv_rtol,
+            self.conv_atol, self.max_cycle, callback=callback,
+            residual0=initial_residual)
+        self.lagrange_hop_solve = hop_count[0] - solve_start
+        validation_start = hop_count[0]
+        geff = geff_op(Lvec)
+        self.lagrange_hop_validation = hop_count[0] - validation_start
+        self.lagrange_hop_total = hop_count[0]
+        self.lagrange_iterations = int(it[0])
+        logger.debug(self, 'Lagrange recursive/exact residual difference: %.8g',
+                     linalg.norm(geff + recursive_residual))
+        logger.info(self, ('Lagrange multiplier determination {} after {} iterations\n'
+                           '   |geff| = {}, |Lvec| = {}\n'
+                           '   Hessian products: setup {}, solve {}, validation {}, total {}').format(
+                               'converged' if info_int == 0 else 'not converged',
+                               it[0], linalg.norm(geff), linalg.norm(Lvec),
+                               self.lagrange_hop_setup, self.lagrange_hop_solve,
+                               self.lagrange_hop_validation, self.lagrange_hop_total))
+        if info_int < 0:
+            logger.info(self, 'Lagrange multiplier determination error code %s', info_int)
+        return (info_int == 0), Lvec, bvec, raw_Aop, Adiag
 
     def kernel (self, state=None, atmlst=None, verbose=None, mo=None, ci=None, eris=None,
                 mf_grad=None, e_states=None, level_shift=None, **kwargs):
@@ -1234,5 +1371,134 @@ class SACASLagPrec (lagrange.LagPrec):
                     raise (e)
         assert (all (i is not None for i in Mxci))
         return Mxci
+
+
+class CoupledPspPred:
+    '''Fixed symmetric two-level preconditioner for the SA-CASSCF response.
+
+    The primary space starts from the error left by the diagonal prediction
+    and follows a short preconditioned Krylov sequence.  Ritz vectors of that
+    coupled orbital/CI space are treated with the full Hessian.  The
+    complementary space uses ``SACASLagPrec``.  The symmetric two-level form
+    keeps the preconditioner suitable for conjugate gradient.
+    '''
+
+    def __init__(self, Aop, Adiag, bvec, base_prec, grad_method,
+                 pspace_size=8, pspace_shift=1e-8):
+        self.Aop = Aop
+        self.Adiag = np.asarray(Adiag)
+        self.bvec = np.asarray(bvec)
+        self.base_prec = base_prec
+        self.grad_method = grad_method
+        self.pspace_size = min(int(pspace_size), 16, self.bvec.size)
+        self.pspace_shift = float(pspace_shift)
+        self.U, self.W = self._make_pspace()
+        reduced_hess = np.dot(self.U.conjugate().T, self.W)
+        self.reduced_hess = (reduced_hess + reduced_hess.conjugate().T) * .5
+        self._factor_reduced_hess()
+        self._make_initial_guess()
+        logger.info(
+            grad_method,
+            ('CoupledPspPred: fixed symmetric residual/Ritz P space dimension %d, '
+             'setup Hx %d, diagonal-prediction residual %.8g'),
+            self.U.shape[1], self.setup_hop_count,
+            linalg.norm(self.diagonal_residual))
+
+    @staticmethod
+    def _orthogonalize(candidate, basis):
+        candidate = np.array(candidate, copy=True)
+        for _ in range(2):
+            for vector in basis:
+                candidate -= vector * np.vdot(vector, candidate)
+        norm = linalg.norm(candidate)
+        if norm < 1e-10:
+            return None
+        return candidate / norm
+
+    def _make_pspace(self):
+        rhs = -self.bvec
+        self.diagonal_prediction = np.asarray(self.base_prec(rhs))
+        h_prediction = self.Aop(self.diagonal_prediction)
+        self.setup_hop_count = 1
+        self.diagonal_residual = rhs - h_prediction
+
+        basis = []
+        h_basis = []
+
+        # Include the diagonal prediction itself: its Hessian product is also
+        # the product used to measure the residual, so it is not setup
+        # overhead.  Subsequent vectors follow the error that remains.
+        prediction_norm = linalg.norm(self.diagonal_prediction)
+        if prediction_norm > 1e-10:
+            basis.append(self.diagonal_prediction / prediction_norm)
+            h_basis.append(h_prediction / prediction_norm)
+
+        candidate = np.asarray(self.base_prec(self.diagonal_residual))
+        while len(basis) < self.pspace_size:
+            candidate = self._orthogonalize(candidate, basis)
+            if candidate is None:
+                break
+            basis.append(candidate)
+            h_candidate = self.Aop(candidate)
+            self.setup_hop_count += 1
+            h_basis.append(h_candidate)
+            candidate = np.asarray(self.base_prec(h_candidate))
+
+        # Krylov breakdown is rare.  Complete the requested fixed dimension
+        # with residual-ranked coordinate directions if it occurs.
+        if len(basis) < self.pspace_size:
+            error = np.abs(np.asarray(self.base_prec(self.diagonal_residual)))
+            for index in np.argsort(error)[::-1]:
+                candidate = np.zeros_like(self.bvec)
+                candidate[index] = 1
+                candidate = self._orthogonalize(
+                    np.asarray(self.base_prec(candidate)), basis)
+                if candidate is None:
+                    continue
+                basis.append(candidate)
+                h_basis.append(self.Aop(candidate))
+                self.setup_hop_count += 1
+                if len(basis) == self.pspace_size:
+                    break
+        if not basis:
+            raise linalg.LinAlgError('CoupledPspPred could not construct a P space')
+        return np.column_stack(basis), np.column_stack(h_basis)
+
+    def _make_initial_guess(self):
+        '''Reuse the P-space Galerkin solve as the CG starting prediction.'''
+        coarse_error = np.dot(self.U.conjugate().T,
+                              self.diagonal_residual)
+        correction = self._solve_reduced(coarse_error)
+        self.initial_guess = (self.diagonal_prediction
+                              + np.dot(self.U, correction))
+        self.initial_residual = (self.diagonal_residual
+                                 - np.dot(self.W, correction))
+
+    def _factor_reduced_hess(self):
+        eigenvalues, eigenvectors = linalg.eigh(self.reduced_hess)
+        scale = max(np.max(np.abs(eigenvalues)), 1.)
+        floor = max(self.pspace_shift, np.finfo(eigenvalues.dtype).eps * scale)
+        shifted = np.maximum(eigenvalues, floor)
+        if np.any(eigenvalues < floor):
+            logger.debug(
+                self.grad_method,
+                'CoupledPspPred regularized %d reduced-Hessian eigenvalues; min = %.8g',
+                np.count_nonzero(eigenvalues < floor), eigenvalues.min())
+        self.reduced_eigenvalues = shifted
+        self.reduced_eigenvectors = eigenvectors
+
+    def _solve_reduced(self, x):
+        eigvec = self.reduced_eigenvectors
+        return np.dot(eigvec, np.dot(eigvec.conjugate().T, x) /
+                      self.reduced_eigenvalues)
+
+    def __call__(self, x):
+        coarse_rhs = np.dot(self.U.conjugate().T, x)
+        alpha = self._solve_reduced(coarse_rhs)
+        secondary_rhs = x - np.dot(self.W, alpha)
+        secondary = np.asarray(self.base_prec(secondary_rhs))
+        beta = self._solve_reduced(
+            np.dot(self.W.conjugate().T, secondary))
+        return secondary - np.dot(self.U, beta) + np.dot(self.U, alpha)
 
 mcscf.addons.StateAverageMCSCFSolver.Gradients = lib.class_as_method(Gradients)
