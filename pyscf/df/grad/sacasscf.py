@@ -573,7 +573,6 @@ def Lorb_Lci_dot_dgorb_dgci_dx(Lorb, Lci, weights, mc, mo_coeff=None,
     dmL_cas = reduce(np.dot, (moL_cas, casdm1, mo_cas.T))
     dmL_core += dmL_core.T
     dmL_cas += dmL_cas.T
-    dm1 = dm_core + dm_cas
     dm1L = dmL_core + dmL_cas
 
     casdm1_ci, casdm2_ci = mc.fcisolver.trans_rdm12(
