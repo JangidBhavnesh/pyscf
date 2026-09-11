@@ -933,18 +933,7 @@ class Gradients (lagrange.Gradients):
 
         The target-state Hamiltonian, orbital Lagrange, and CI Lagrange
         contributions are contracted in one derivative-integral pass.
-        Subclasses that replace either separate response component retain the
-        generic two-step implementation until they provide their own combined
-        response.
         '''
-        cls = type(self)
-        if (getattr(cls, 'get_ham_response') is not Gradients.get_ham_response or
-                getattr(cls, 'get_LdotJnuc') is not Gradients.get_LdotJnuc):
-            return super().get_nuc_response(Lvec, state=state, atmlst=atmlst,
-                                            verbose=verbose, mo=mo, ci=ci,
-                                            eris=eris, mf_grad=mf_grad,
-                                            **kwargs)
-
         if state is None: state = self.state
         if atmlst is None: atmlst = self.atmlst
         if verbose is None: verbose = self.verbose

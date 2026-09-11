@@ -782,14 +782,6 @@ class Gradients (sacasscf_grad.Gradients):
     def get_nuc_response(self, Lvec, state=None, atmlst=None, verbose=None,
                          mo=None, ci=None, eris=None, mf_grad=None, **kwargs):
         '''Return the combined DF SA-CASSCF nuclear response.'''
-        cls = type(self)
-        if (getattr(cls, 'get_ham_response') is not Gradients.get_ham_response or
-                getattr(cls, 'get_LdotJnuc') is not Gradients.get_LdotJnuc):
-            return super().get_nuc_response(Lvec, state=state, atmlst=atmlst,
-                                            verbose=verbose, mo=mo, ci=ci,
-                                            eris=eris, mf_grad=mf_grad,
-                                            **kwargs)
-
         if state is None: state = self.state
         if atmlst is None: atmlst = self.atmlst
         if verbose is None: verbose = self.verbose
