@@ -20,6 +20,7 @@ from pyscf.dft import gen_grid
 from pyscf.lib import logger, tag_array, pack_tril, current_memory
 from pyscf.mcscf import casci, mc1step, newton_casscf
 from pyscf.grad import sacasscf
+from pyscf.grad import lagrange
 from pyscf.mcscf.casci import cas_natorb
 
 from pyscf.mcpdft.otpd import get_ontop_pair_density, _grid_ao2mo
@@ -395,6 +396,10 @@ class Gradients(sacasscf.Gradients):
             raise NotImplementedError(
                 "{} for range-separated MC-PDFT functionals".format(name)
             )
+
+    def get_nuc_response(self, Lvec, **kwargs):
+        '''Use the generic separate response for L-PDFT gradients.'''
+        return lagrange.Gradients.get_nuc_response(self, Lvec, **kwargs)
 
     def kernel(self, **kwargs):
         state = kwargs["state"] if "state" in kwargs else self.state

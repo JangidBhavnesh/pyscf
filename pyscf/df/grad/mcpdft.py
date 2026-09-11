@@ -26,6 +26,9 @@ class Gradients (dfsacasscf_grad.Gradients, mcpdft_grad.Gradients):
         self.auxbasis_response = True
         mcpdft_grad.Gradients.__init__(self, pdft, state=state)
 
+    def get_nuc_response(self, Lvec, **kwargs):
+        return mcpdft_grad.Gradients.get_nuc_response(self, Lvec, **kwargs)
+
     # TODO: rewrite the partialized fn to take the actual caller, use getattr,
     # and delete this
     def get_ham_response (self, **kwargs):
@@ -38,4 +41,3 @@ class Gradients (dfsacasscf_grad.Gradients, mcpdft_grad.Gradients):
     get_wfn_response = mcpdft_grad.Gradients.get_wfn_response
     get_init_guess = mcpdft_grad.Gradients.get_init_guess
     project_Aop = mcpdft_grad.Gradients.project_Aop
-
