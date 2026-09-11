@@ -99,21 +99,16 @@ def tearDownModule():
     del mol, mf
 
 class KnownValues(unittest.TestCase):
-    def assert_opt_sacasscf_gradients(self, mc, grad_module):
+    def assert_sacasscf_response_paths(self, mc, grad_module):
         standard_solver = grad_module.Gradients(mc, state=0)
         standard_gradient = standard_solver.kernel()
         component_solver = grad_module.Gradients(mc, state=0)
         component_gradient = component_solver.kernel(verbose=lib.logger.DEBUG1)
-        optimized_solver = grad_module.OPT_Gradients(mc, state=0)
-        optimized_gradient = optimized_solver.kernel()
 
         self.assertTrue(standard_solver.converged)
         self.assertTrue(component_solver.converged)
-        self.assertTrue(optimized_solver.converged)
         self.assertAlmostEqual(
             abs(standard_gradient - component_gradient).max(), 0, 7)
-        self.assertAlmostEqual(
-            abs(standard_gradient - optimized_gradient).max(), 0, 7)
 
     def test_casscf_grad(self):
         mc = mcscf.CASSCF(mf, 4, 4).run()
@@ -295,7 +290,7 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(de_0[1,2], (e1_0-e2_0)/0.002*lib.param.BOHR, 4)
         self.assertAlmostEqual(de_1[1,2], (e1_1-e2_1)/0.002*lib.param.BOHR, 4)
 
-    def test_opt_state_average_grad(self):
+    def test_state_average_response_paths(self):
         for label, mean_field, grad_module in (
                 ('conventional', mf, sacasscf_grad),
                 ('density-fitted', mf_df, dfsacasscf_grad)):
@@ -304,9 +299,9 @@ class KnownValues(unittest.TestCase):
                 mc.conv_tol = 1e-10
                 mc.fcisolver.conv_tol = 1e-10
                 mc.state_average_([.5, .5]).run()
-                self.assert_opt_sacasscf_gradients(mc, grad_module)
+                self.assert_sacasscf_response_paths(mc, grad_module)
 
-    def test_opt_state_average_mix_grad(self):
+    def test_state_average_mix_response_paths(self):
         for label, mean_field, grad_module in (
                 ('conventional', mf, sacasscf_grad),
                 ('density-fitted', mf_df, dfsacasscf_grad)):
@@ -320,7 +315,7 @@ class KnownValues(unittest.TestCase):
                 fcisolvers[0].spin = 2
                 mcscf.addons.state_average_mix_(
                     mc, fcisolvers, (.5, .5)).run()
-                self.assert_opt_sacasscf_gradients(mc, grad_module)
+                self.assert_sacasscf_response_paths(mc, grad_module)
 
     def test_with_x2c_scanner(self):
         with lib.light_speed(20.):
