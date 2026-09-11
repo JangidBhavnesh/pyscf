@@ -102,11 +102,16 @@ class KnownValues(unittest.TestCase):
     def assert_opt_sacasscf_gradients(self, mc, grad_module):
         standard_solver = grad_module.Gradients(mc, state=0)
         standard_gradient = standard_solver.kernel()
+        component_solver = grad_module.Gradients(mc, state=0)
+        component_gradient = component_solver.kernel(verbose=lib.logger.DEBUG1)
         optimized_solver = grad_module.OPT_Gradients(mc, state=0)
         optimized_gradient = optimized_solver.kernel()
 
         self.assertTrue(standard_solver.converged)
+        self.assertTrue(component_solver.converged)
         self.assertTrue(optimized_solver.converged)
+        self.assertAlmostEqual(
+            abs(standard_gradient - component_gradient).max(), 0, 7)
         self.assertAlmostEqual(
             abs(standard_gradient - optimized_gradient).max(), 0, 7)
 
