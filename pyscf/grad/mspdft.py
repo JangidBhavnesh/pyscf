@@ -205,6 +205,99 @@ def get_diabfns (obj):
         raise RuntimeError ('MS-PDFT type not supported')
     return diab_response, diab_grad
 
+
+def mspdft_nuc_response(mc_grad, Lvec, mc_nuc_response=None,
+                        si_bra=None, si_ket=None, state=None, mo=None,
+                        ci=None, si=None, eris=None, veff1=None, veff2=None,
+                        mf_grad=None, atmlst=None, verbose=None, **kwargs):
+    '''Combined MS-PDFT Hamiltonian and Lagrange nuclear response.
+
+    The SA orbital/CI Lagrange response is folded into one nonzero diagonal
+    MC-PDFT contribution.  The off-diagonal Hamiltonian and intermediate-state
+    Lagrange terms are then added; they do not share derivative-integral work
+    with the diagonal PDFT response.
+    '''
+    if mc_nuc_response is None:
+        mc_nuc_response = mcpdft_grad.mcpdft_nuc_response
+    if atmlst is None:
+        atmlst = mc_grad.atmlst
+    if mo is None:
+        mo = mc_grad.base.mo_coeff
+    if ci is None:
+        ci = mc_grad.base.ci
+    if si is None:
+        si = mc_grad.base.si
+    if state is None:
+        state = mc_grad.state
+    ket, bra = _unpack_state(state)
+    if si_bra is None:
+        si_bra = si[:,bra]
+    if si_ket is None:
+        si_ket = si[:,ket]
+    if eris is None and mc_grad.eris is None:
+        eris = mc_grad.eris = mc_grad.base.ao2mo(mo)
+    elif eris is None:
+        eris = mc_grad.eris
+    if mf_grad is None:
+        mf_grad = mc_grad.base.get_rhf_base().nuc_grad_method()
+    if verbose is None:
+        verbose = mc_grad.verbose
+
+    ngorb, nci = mc_grad.ngorb, mc_grad.nci
+    Lvec_v, Lvec_is = Lvec[:ngorb+nci], Lvec[ngorb+nci:]
+    _, Lvec_ci = mc_grad.unpack_uniq_var(Lvec_v)
+    Lvec_is2 = mc_grad._get_is_component(Lvec_ci, symm=0)
+    assert np.amax(np.abs(Lvec_is2)) < 1e-8, '{} {}'.format(
+        Lvec_is, Lvec_is2)
+
+    si_diag = si_bra * si_ket
+    active = np.flatnonzero(np.abs(si_diag) > 1e-14)
+    log = logger.new_logger(mc_grad, verbose)
+    de_nuc = mf_grad.grad_nuc(mc_grad.mol, atmlst)
+    de = si_diag.sum() * de_nuc.copy()
+    if len(active):
+        combine_state = active[np.argmax(np.abs(si_diag[active]))]
+        combine_amp = si_diag[combine_state]
+        for i, (amp, v1, v2) in enumerate(zip(si_diag, veff1, veff2)):
+            if not amp:
+                continue
+            if i == combine_state:
+                de_i = mc_nuc_response(
+                    mc_grad, Lvec_v / combine_amp, state=i,
+                    atmlst=atmlst, verbose=0, mo=mo, ci=ci, eris=eris,
+                    mf_grad=mf_grad, veff1=v1, veff2=v2, **kwargs)
+            else:
+                de_i = mcpdft_grad.Gradients.get_ham_response(
+                    mc_grad, state=i, mo=mo, ci=ci, veff1=v1, veff2=v2,
+                    eris=eris, mf_grad=mf_grad, atmlst=atmlst, verbose=0,
+                    **kwargs)
+            de += amp * (de_i - de_nuc)
+    else:
+        # Exactly disjoint model-space vectors have no diagonal PDFT term.
+        # Use an arbitrary state to carry the SA response, then subtract its
+        # unweighted Hamiltonian response.
+        combined = mc_nuc_response(
+            mc_grad, Lvec_v, state=0, atmlst=atmlst, verbose=0, mo=mo,
+            ci=ci, eris=eris, mf_grad=mf_grad, veff1=veff1[0],
+            veff2=veff2[0], **kwargs)
+        unweighted = mcpdft_grad.Gradients.get_ham_response(
+            mc_grad, state=0, mo=mo, ci=ci, veff1=veff1[0],
+            veff2=veff2[0], eris=eris, mf_grad=mf_grad, atmlst=atmlst,
+            verbose=0, **kwargs)
+        de += combined - unweighted
+    log.debug('MS-PDFT combined diagonal and SA response:\n%s', de)
+
+    de_heff = mspdft_heff_HellmanFeynman(
+        mc_grad, mo_coeff=mo, ci=ci, si_bra=si_bra, si_ket=si_ket,
+        eris=eris, state=state, mf_grad=mf_grad, atmlst=atmlst,
+        **kwargs)
+    de_is = mc_grad.diab_grad(
+        Lvec_is, atmlst=atmlst, mf_grad=mf_grad, eris=eris, mo=mo,
+        ci=ci, **kwargs)
+    log.debug('MS-PDFT off-diagonal H-F response:\n%s', de_heff)
+    log.debug('MS-PDFT Lagrange IS response:\n%s', de_is)
+    return de + de_heff + de_is
+
 # TODO: docstring? especially considering the "si_bra," "si_ket"
 # functionality??
 # TODO: figure out how to log the gradients with the right method name!
@@ -240,8 +333,13 @@ class Gradients (mcpdft_grad.Gradients):
         return self._diab_grad (self, Lis, **kwargs)
 
     def get_nuc_response(self, Lvec, **kwargs):
-        '''Use the generic separate response for MS-PDFT gradients.'''
-        return mcpdft_grad.Gradients.get_nuc_response(self, Lvec, **kwargs)
+        '''Return the combined MS-PDFT Hamiltonian and Lagrange response.'''
+        # Subclasses such as MS-PDFT NACs add method-specific Hamiltonian
+        # response terms.  Keep their polymorphic split path unchanged.
+        if type(self).get_ham_response is not Gradients.get_ham_response:
+            return mcpdft_grad.Gradients.get_nuc_response(
+                self, Lvec, **kwargs)
+        return mspdft_nuc_response(self, Lvec, **kwargs)
 
     def kernel (self, state=None, mo=None, ci=None, si=None, _freeze_is=False,
             **kwargs):

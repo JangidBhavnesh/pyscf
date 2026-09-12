@@ -300,14 +300,16 @@ def Lci_dot_dgci_dx (Lci, weights, mc, mo_coeff=None, ci=None, atmlst=None, mf_g
 
 def _grad_elec_df_response_direct(mc, mf_grad, dms, pair_weights,
                                   mo_df_pairs, atmlst, max_memory,
-                                  auxbasis_response=True):
+                                  auxbasis_response=True,
+                                  exchange_pair_weights=None):
     '''Directly contract all DF response terms into atomic gradients.
 
     This follows the direct-contraction layout used in
     ``gpu4pyscf/df/grad/jk.py:get_grad_vjk``: derivative three-center
     integrals are generated once and immediately contracted into forces.
-    ``pair_weights[i,j]`` selects the one-particle density pairs required by
-    the SA-CASSCF response, avoiding the dense nset-by-nset auxiliary tensor.
+    ``pair_weights[i,j]`` selects the Coulomb density pairs required by the
+    response, avoiding the dense nset-by-nset auxiliary tensor. Exchange uses
+    the same weights unless ``exchange_pair_weights`` is supplied.
     The active-space DF-RDM2 terms share the same ip1 and ip2 integral loops.
     '''
     mol = mc.mol
@@ -318,13 +320,24 @@ def _grad_elec_df_response_direct(mc, mf_grad, dms, pair_weights,
     pair_weights = np.asarray(pair_weights)
     if pair_weights.shape != (nset, nset):
         raise ValueError('pair_weights must have shape (nset,nset)')
-    active_pairs = np.argwhere(abs(pair_weights) > 1e-14)
-    exchange_pairs = {(int(i), int(j)) for i, j in active_pairs}
+    if exchange_pair_weights is None:
+        exchange_pair_weights = pair_weights
+    exchange_pair_weights = np.asarray(exchange_pair_weights)
+    if exchange_pair_weights.shape != (nset, nset):
+        raise ValueError(
+            'exchange_pair_weights must have shape (nset,nset)')
+    coulomb_pairs = np.argwhere(abs(pair_weights) > 1e-14)
+    exchange_active_pairs = np.argwhere(
+        abs(exchange_pair_weights) > 1e-14)
+    exchange_pairs = {
+        (int(i), int(j)) for i, j in exchange_active_pairs}
     exchange_pairs.update((j, i) for i, j in tuple(exchange_pairs))
 
     # The AO derivative matrices are never formed.  For each source density,
     # combine all right-hand densities before entering the integral loop.
-    right_dms = np.einsum('ij,jpq->ipq', pair_weights, dms)
+    right_coulomb_dms = np.einsum('ij,jpq->ipq', pair_weights, dms)
+    right_exchange_dms = np.einsum(
+        'ij,jpq->ipq', exchange_pair_weights, dms)
 
     diag_idx = np.arange(nao)
     diag_idx = diag_idx * (diag_idx+1) // 2 + diag_idx
@@ -391,12 +404,15 @@ def _grad_elec_df_response_direct(mc, mf_grad, dms, pair_weights,
         # stored as (nset,nset,3,naux).
         metric_j = {
             int(j): lib.einsum('xpq,q->px', int2c_e1, rhoj[int(j)])
-            for j in np.unique(active_pairs[:,1])
+            for j in np.unique(coulomb_pairs[:,1])
         }
-        for i_, j_ in active_pairs:
+        for i_, j_ in coulomb_pairs:
             i, j = int(i_), int(j_)
             weight = pair_weights[i,j]
             de_aux_j -= weight * rhoj[i,:,None] * metric_j[j]
+        for i_, j_ in exchange_active_pairs:
+            i, j = int(i_), int(j_)
+            weight = exchange_pair_weights[i,j]
             metric_k = lib.einsum(
                 'pij,qji->pq', rhok_oo[i,j], rhok_oo[j,i])
             de_aux_k -= weight * lib.einsum(
@@ -437,28 +453,34 @@ def _grad_elec_df_response_direct(mc, mf_grad, dms, pair_weights,
         # matrix immediately with its pre-combined right-hand density.
         int3c = np.ascontiguousarray(int3c_ao.transpose(0,3,2,1))
         for i in range(nset):
-            if not np.any(pair_weights[i]):
+            with_coulomb = np.any(pair_weights[i])
+            with_exchange = np.any(exchange_pair_weights[i])
+            if not (with_coulomb or with_exchange):
                 continue
-            vj = np.empty((3, nao, nao))
-            for x in range(3):
-                vj[x] = np.dot(
-                    rhoj[i,p0:p1],
-                    int3c[x].reshape(p1-p0, -1)).reshape(nao, nao).T
+            if with_coulomb:
+                vj = np.empty((3, nao, nao))
+                for x in range(3):
+                    vj[x] = np.dot(
+                        rhoj[i,p0:p1],
+                        int3c[x].reshape(p1-p0, -1)).reshape(
+                            nao, nao).T
+                de_ao -= lib.einsum(
+                    'xuv,uv->ux', vj, right_coulomb_dms[i]) * 2
 
-            tmp = np.empty((3, p1-p0, nocc[i], nao),
-                           dtype=orbol[i].dtype)
-            fdrv(ftrans, fmmm,
-                 tmp.ctypes.data_as(ctypes.c_void_p),
-                 int3c.ctypes.data_as(ctypes.c_void_p),
-                 orbol[i].ctypes.data_as(ctypes.c_void_p),
-                 ctypes.c_int(3*(p1-p0)), ctypes.c_int(nao),
-                 (ctypes.c_int*4)(0, nocc[i], 0, nao),
-                 null, ctypes.c_int(0))
-            rhok = get_rhok(i, p0, p1)
-            vk = lib.einsum('xpoi,pok->xik', tmp, rhok)
-            veff = -(vj - .5 * vk)
-            de_ao += lib.einsum(
-                'xuv,uv->ux', veff, right_dms[i]) * 2
+            if with_exchange:
+                tmp = np.empty((3, p1-p0, nocc[i], nao),
+                               dtype=orbol[i].dtype)
+                fdrv(ftrans, fmmm,
+                     tmp.ctypes.data_as(ctypes.c_void_p),
+                     int3c.ctypes.data_as(ctypes.c_void_p),
+                     orbol[i].ctypes.data_as(ctypes.c_void_p),
+                     ctypes.c_int(3*(p1-p0)), ctypes.c_int(nao),
+                     (ctypes.c_int*4)(0, nocc[i], 0, nao),
+                     null, ctypes.c_int(0))
+                rhok = get_rhok(i, p0, p1)
+                vk = lib.einsum('xpoi,pok->xik', tmp, rhok)
+                de_ao += lib.einsum(
+                    'xuv,uv->ux', vk, right_exchange_dms[i])
 
     de_aux = np.zeros((naux, 3))
     if auxbasis_response:
@@ -477,7 +499,7 @@ def _grad_elec_df_response_direct(mc, mf_grad, dms, pair_weights,
         # Group selected pairs by their left density so the ip2 AO-to-MO
         # transformation is shared by all requested right densities.
         right_by_left = {}
-        for i_, j_ in active_pairs:
+        for i_, j_ in exchange_active_pairs:
             i, j = int(i_), int(j_)
             right_by_left.setdefault(i, []).append(j)
 
@@ -490,7 +512,7 @@ def _grad_elec_df_response_direct(mc, mf_grad, dms, pair_weights,
 
             drhoj = lib.dot(int3c, dm_tril.T).reshape(
                 3, p1-p0, nset)
-            for i_, j_ in active_pairs:
+            for i_, j_ in coulomb_pairs:
                 i, j = int(i_), int(j_)
                 de_aux_j[p0:p1] += pair_weights[i,j] * (
                     drhoj[:,:,i] * rhoj[j,p0:p1][None,:]).T
@@ -509,9 +531,9 @@ def _grad_elec_df_response_direct(mc, mf_grad, dms, pair_weights,
                     int3c_ij = lib.dot(buf.reshape(-1, nao), orbor[j])
                     int3c_ij = int3c_ij.reshape(
                         3, p1-p0, nocc[i], nocc[j])
-                    de_aux_k[p0:p1] += pair_weights[i,j] * lib.einsum(
-                        'xpij,pij->px', int3c_ij,
-                        rhok_oo[i,j][p0:p1])
+                    de_aux_k[p0:p1] += exchange_pair_weights[i,j] * (
+                        lib.einsum('xpij,pij->px', int3c_ij,
+                                   rhok_oo[i,j][p0:p1]))
 
             for mo0, mo1, mosym, nmo_pair, mo_conc, mo_slice, dm2 in prepared:
                 intbuf = _ao2mo.nr_e2(

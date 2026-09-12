@@ -17,6 +17,7 @@ from pyscf import lib
 from pyscf.grad import sacasscf as sacasscf_grad
 from pyscf.grad import mspdft as mspdft_grad
 from pyscf.grad import mcpdft as mcpdft_grad
+from pyscf.df.grad import mcpdft as dfmcpdft_grad
 from pyscf.df.grad import casscf as dfcasscf_grad
 from pyscf.df.grad import sacasscf as dfsacasscf_grad
 from pyscf.df.grad import rhf as dfrhf_grad
@@ -30,7 +31,14 @@ class Gradients (mspdft_grad.Gradients):
         mspdft_grad.Gradients.__init__(self, pdft)
 
     def get_nuc_response(self, Lvec, **kwargs):
-        return mspdft_grad.Gradients.get_nuc_response(self, Lvec, **kwargs)
+        pfn = partial(mcpdft_grad.mcpdft_HellmanFeynman_grad,
+                      auxbasis_response=self.auxbasis_response)
+        with lib.temporary_env(
+                mcpdft_grad, mcpdft_HellmanFeynman_grad=pfn):
+            return mspdft_grad.mspdft_nuc_response(
+                self, Lvec,
+                mc_nuc_response=dfmcpdft_grad.mcpdft_nuc_response,
+                **kwargs)
 
     def make_fcasscf (self, state=None, casscf_attr={}, fcisolver_attr={}):
         fcasscf = sacasscf_grad.Gradients.make_fcasscf (self, state=state,
@@ -53,4 +61,3 @@ class Gradients (mspdft_grad.Gradients):
          Lci_dot_dgci_dx=dfsacasscf_grad.Lci_dot_dgci_dx,
          Lorb_dot_dgorb_dx=dfsacasscf_grad.Lorb_dot_dgorb_dx):
             return mspdft_grad.Gradients.get_LdotJnuc (self, Lvec, **kwargs)
-

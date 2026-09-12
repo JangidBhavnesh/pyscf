@@ -20,7 +20,6 @@ from pyscf.dft import gen_grid
 from pyscf.lib import logger, tag_array, pack_tril, current_memory
 from pyscf.mcscf import casci, mc1step, newton_casscf
 from pyscf.grad import sacasscf
-from pyscf.grad import lagrange
 from pyscf.mcscf.casci import cas_natorb
 
 from pyscf.mcpdft.otpd import get_ontop_pair_density, _grid_ao2mo
@@ -277,6 +276,8 @@ def lpdft_HellmanFeynman_grad(
     verbose=None,
     max_memory=None,
     auxbasis_response=False,
+    lagrange_intermediates=None,
+    combined_df_response=None,
 ):
     if mo_coeff is None:
         mo_coeff = mc.mo_coeff
@@ -286,9 +287,16 @@ def lpdft_HellmanFeynman_grad(
         mf_grad = mc.get_rhf_base ().nuc_grad_method()
     if mc.frozen is not None:
         raise NotImplementedError
+    if (auxbasis_response and lagrange_intermediates is not None
+            and combined_df_response is None):
+        raise ValueError(
+            "combined_df_response is required for a combined DF-L-PDFT "
+            "nuclear response")
     mol = mc.mol
     if atmlst is None:
-        atmlst = range(mol.natm)
+        atmlst = list(range(mol.natm))
+    else:
+        atmlst = list(atmlst)
 
     t0 = (logger.process_clock(), logger.perf_counter())
 
@@ -314,12 +322,33 @@ def lpdft_HellmanFeynman_grad(
 
     dme0 = mo_coeff @ (0.5 * (gfock + gfock.T)) @ mo_coeff.T
     del gfock, gfock_impl, gfock_expl
+
+    if lagrange_intermediates is not None:
+        common, orbital_response, ci_response = lagrange_intermediates
+        dme0 += mcpdft_grad._sa_lagrange_energy_weighted_density(
+            lagrange_intermediates)
+        dm1_lagrange = orbital_response["dm1L"] + ci_response["dm_cas"]
     t0 = logger.timer(mc, "L-PDFT HlFn gfock", *t0)
 
     # Coulomb potential derivatives generated from zero-order density
-    dvj_all = mf_grad.get_j(dm=[dm1, dm1_0])
-    dvj = dvj_all[0]
-    dvj_0 = dvj_all[1]
+    if combined_df_response is not None:
+        dvj_all = None
+        dvj = dvj_0 = None
+    elif lagrange_intermediates is None:
+        dvj_all = mf_grad.get_j(dm=[dm1, dm1_0])
+        dvj = dvj_all[0]
+        dvj_0 = dvj_all[1]
+    else:
+        lagrange_jk_dms = (
+            common["dm_core"], orbital_response["dm_cas"],
+            orbital_response["dmL_core"], orbital_response["dmL_cas"],
+            ci_response["dm_cas"])
+        derivative_dms = (dm1, dm1_0) + lagrange_jk_dms
+        derivative_vj, derivative_vk = mf_grad.get_jk(
+            mol, derivative_dms)
+        dvj, dvj_0 = derivative_vj[:2]
+        lagrange_vhf1 = (derivative_vj[2:]
+                         - derivative_vk[2:] * .5)
 
     dvxc, de_wgt, de_grid = get_ontop_response(
         mc,
@@ -335,15 +364,30 @@ def lpdft_HellmanFeynman_grad(
 
     delta_dm1 = dm1 - dm1_0
 
-    def coul_term(p0, p1):
-        return 2 * (
-            np.tensordot(dvj_0[:, p0:p1], delta_dm1[p0:p1])
-            + np.tensordot(dvj[:, p0:p1], dm1_0[p0:p1])
-        )
+    if combined_df_response is None:
+        def coul_term(p0, p1):
+            return 2 * (
+                np.tensordot(dvj_0[:, p0:p1], delta_dm1[p0:p1])
+                + np.tensordot(dvj[:, p0:p1], dm1_0[p0:p1])
+            )
+    else:
+        def coul_term(p0, p1):
+            return np.zeros(3)
+
+    dm1_hcore = dm1
+    if lagrange_intermediates is not None:
+        dm1_hcore = dm1_hcore + dm1_lagrange
 
     de_hcore, de_coul, de_xc, de_nuc, de_renorm = mcpdft_grad.sum_terms(
-        mf_grad, mol, atmlst, dm1, dme0, coul_term, dvxc
+        mf_grad, mol, atmlst, dm1_hcore, dme0, coul_term, dvxc
     )
+
+    if (lagrange_intermediates is not None
+            and combined_df_response is None):
+        de_lagrange_eri = mcpdft_grad._sa_lagrange_eri_response(
+            lagrange_intermediates, lagrange_vhf1, atmlst)
+    else:
+        de_lagrange_eri = 0
 
     logger.debug(mc, "L-PDFT Hellmann-Feynman nuclear:\n{}".format(de_nuc))
     logger.debug(mc, "L-PDFT Hellmann-Feynman hcore component:\n{}".format(de_hcore))
@@ -357,9 +401,16 @@ def lpdft_HellmanFeynman_grad(
     )
     logger.debug(mc, "L-PDFT Hellmann-Feynman renorm component:\n{}".format(de_renorm))
 
-    de = de_nuc + de_hcore + de_coul + de_renorm + de_xc + de_grid + de_wgt
+    logger.debug(mc, "L-PDFT Lagrange eri component:\n%s", de_lagrange_eri)
+    de = (de_nuc + de_hcore + de_coul + de_renorm + de_xc
+          + de_grid + de_wgt + de_lagrange_eri)
 
-    if auxbasis_response:
+    if combined_df_response is not None:
+        de += combined_df_response
+        logger.debug(mc, "L-PDFT combined DF component:\n%s",
+                     combined_df_response)
+
+    if auxbasis_response and combined_df_response is None:
         dvj_aux = dvj_all.aux[:,:,atmlst,:]
         de_aux = dvj_aux[1, 0] + dvj_aux[0, 1] - dvj_aux[1, 1]
         logger.debug(mc, "L-PDFT Hellmann-Feynman aux component:\n{}".format(de_aux))
@@ -368,6 +419,38 @@ def lpdft_HellmanFeynman_grad(
     logger.timer(mc, "L-PDFT HlFn total", *t0)
 
     return de
+
+
+def lpdft_nuc_response(mc_grad, Lvec, state=None, atmlst=None,
+                       verbose=None, mo=None, ci=None, eris=None,
+                       mf_grad=None, feff1=None, feff2=None, **kwargs):
+    '''Combined L-PDFT Hamiltonian, orbital, and CI nuclear response.'''
+    if state is None:
+        state = mc_grad.state
+    if atmlst is None:
+        atmlst = mc_grad.atmlst
+    if verbose is None:
+        verbose = mc_grad.verbose
+    if mo is None:
+        mo = mc_grad.base.mo_coeff
+    if ci is None:
+        ci = mc_grad.base.ci
+    if eris is None and mc_grad.eris is None:
+        eris = mc_grad.eris = mc_grad.base.ao2mo(mo)
+    elif eris is None:
+        eris = mc_grad.eris
+    if mf_grad is None:
+        mf_grad = mc_grad.base.get_rhf_base().nuc_grad_method()
+    if feff1 is None or feff2 is None:
+        raise ValueError("feff1 and feff2 are required")
+
+    Lorb, Lci = mc_grad.unpack_uniq_var(Lvec)
+    lagrange_intermediates = sacasscf.make_sa_lagrange_response_intermediates(
+        Lorb, Lci, mc_grad.base, mo_coeff=mo, ci=ci, eris=eris)
+    return lpdft_HellmanFeynman_grad(
+        mc_grad.base, mc_grad.base.otfnal, state, feff1, feff2,
+        mo_coeff=mo, ci=ci, atmlst=atmlst, mf_grad=mf_grad,
+        verbose=verbose, lagrange_intermediates=lagrange_intermediates)
 
 
 class Gradients(sacasscf.Gradients):
@@ -398,8 +481,8 @@ class Gradients(sacasscf.Gradients):
             )
 
     def get_nuc_response(self, Lvec, **kwargs):
-        '''Use the generic separate response for L-PDFT gradients.'''
-        return lagrange.Gradients.get_nuc_response(self, Lvec, **kwargs)
+        '''Return the combined L-PDFT Hamiltonian and Lagrange response.'''
+        return lpdft_nuc_response(self, Lvec, **kwargs)
 
     def kernel(self, **kwargs):
         state = kwargs["state"] if "state" in kwargs else self.state
