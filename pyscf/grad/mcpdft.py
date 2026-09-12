@@ -15,16 +15,19 @@
 #
 from pyscf.mcscf import newton_casscf, casci, mc1step
 from pyscf.grad import rks as rks_grad
+from pyscf.grad.mp2 import _shell_prange
 from pyscf.dft import gen_grid
 from pyscf.lib import logger, pack_tril, current_memory, einsum, tag_array
 from pyscf.grad import sacasscf
 from pyscf.grad import lagrange
 from pyscf.mcscf.casci import cas_natorb
+from pyscf import ao2mo, lib
 
 from pyscf.mcpdft.pdft_eff import _contract_eff_rho
 from pyscf.mcpdft.otpd import get_ontop_pair_density, _grid_ao2mo
 from pyscf.mcpdft import _dms
 
+from functools import reduce
 from itertools import product
 from scipy import linalg
 import numpy as np
@@ -135,9 +138,160 @@ def sum_terms(mf_grad, mol, atmlst,dm1, gfock, coul_term, dvxc):
 
     return de_hcore, de_coul, de_xc, de_nuc, de_renorm,
 
+
+def _sa_lagrange_energy_weighted_density(lagrange_intermediates):
+    '''Build the overlap-response density for the SA-CASSCF constraints.'''
+    common, orbital_response, ci_response = lagrange_intermediates
+    mc = common['mc']
+    mol = common['mol']
+    mo_coeff = common['mo_coeff']
+    ncore, nocc = common['ncore'], common['nocc']
+    mo_cas = common['mo_cas']
+    dm_core = common['dm_core']
+    s0_inv = common['s0_inv']
+    aapa = common['aapa']
+
+    moL_cas = orbital_response['moL_cas']
+    casdm2 = orbital_response['casdm2']
+    dm_cas = orbital_response['dm_cas']
+    dmL_core = orbital_response['dmL_core']
+    dmL_cas = orbital_response['dmL_cas']
+    dm1L = orbital_response['dm1L']
+    aapaL = orbital_response['aapaL']
+
+    casdm1_ci = ci_response['casdm1']
+    casdm2_ci = ci_response['casdm2']
+    dm_cas_ci = ci_response['dm_cas']
+
+    jk_dms = (dm_core, dm_cas, dmL_core, dmL_cas, dm_cas_ci)
+    vj, vk = mc._scf.get_jk(mol, jk_dms)
+    vhf_c, vhf_a, vhfL_c, vhfL_a, vhf_a_ci = vj - vk * .5
+    h1 = mc.get_hcore()
+
+    gfock = np.dot(h1, dm1L)
+    gfock += np.dot(vhf_c + vhf_a, dmL_core)
+    gfock += np.dot(vhfL_c + vhfL_a, dm_core)
+    gfock += np.dot(vhfL_c, dm_cas)
+    gfock += np.dot(vhf_c, dmL_cas)
+    gfock = np.dot(s0_inv, gfock)
+    gfock += reduce(np.dot, (mo_coeff,
+                             np.einsum('uviw,uvtw->it', aapaL, casdm2),
+                             mo_cas.T))
+    gfock += reduce(np.dot, (mo_coeff,
+                             np.einsum('uviw,vuwt->it', aapa, casdm2),
+                             moL_cas.T))
+    dme0_orb = (gfock + gfock.T) * .5
+
+    nmo = common['nmo']
+    gfock_ci = np.zeros((nmo,nmo), dtype=dm_cas_ci.dtype)
+    gfock_ci[:,:nocc] = reduce(
+        np.dot, (mo_coeff.T, vhf_a_ci, mo_coeff[:,:nocc])) * 2
+    gfock_ci[:,ncore:nocc] = reduce(
+        np.dot, (mo_coeff.T, h1 + vhf_c, mo_cas, casdm1_ci))
+    gfock_ci[:,ncore:nocc] += np.einsum(
+        'uvpw,vuwt->pt', aapa, casdm2_ci)
+    dme0_ci = reduce(
+        np.dot, (mo_coeff, (gfock_ci + gfock_ci.T) * .5, mo_coeff.T))
+    return dme0_orb + dme0_ci
+
+
+def _sa_lagrange_eri_response(lagrange_intermediates, vhf1, atmlst):
+    '''Contract the two-electron SA-CASSCF Lagrange nuclear response.'''
+    common, orbital_response, ci_response = lagrange_intermediates
+    mc = common['mc']
+    mol = common['mol']
+    mo_coeff = common['mo_coeff']
+    ncas, ncore, nocc = common['ncas'], common['ncore'], common['nocc']
+    nao, nmo, nao_pair = common['nao'], common['nmo'], common['nao_pair']
+    mo_cas = common['mo_cas']
+    dm_core = common['dm_core']
+
+    moL_cas = orbital_response['moL_cas']
+    casdm2 = orbital_response['casdm2']
+    dm1 = orbital_response['dm1']
+    dm1L = orbital_response['dm1L']
+    dmL_core = orbital_response['dmL_core']
+    dm_cas_ci = ci_response['dm_cas']
+    casdm2_ci = ci_response['casdm2']
+
+    diag_idx = np.arange(nao)
+    diag_idx = diag_idx * (diag_idx+1) // 2 + diag_idx
+    casdm2_cc = casdm2 + casdm2.transpose(0,1,3,2)
+    dm2buf = ao2mo._ao2mo.nr_e2(
+        casdm2_cc.reshape(ncas**2,ncas**2), mo_cas.T,
+        (0, nao, 0, nao)).reshape(ncas**2,nao,nao)
+    dm2Lbuf = np.zeros((ncas**2,nmo,nmo))
+    Lorb = orbital_response['Lorb']
+    Lcasdm2 = np.tensordot(
+        Lorb[:,ncore:nocc], casdm2, axes=(1,2)).transpose(1,2,0,3)
+    dm2Lbuf[:,:,ncore:nocc] = Lcasdm2.reshape(ncas**2,nmo,ncas)
+    Lcasdm2 = np.tensordot(
+        Lorb[:,ncore:nocc], casdm2, axes=(1,3)).transpose(1,2,3,0)
+    dm2Lbuf[:,ncore:nocc,:] += Lcasdm2.reshape(ncas**2,ncas,nmo)
+    dm2Lbuf += dm2Lbuf.transpose(0,2,1)
+    dm2Lbuf = ao2mo._ao2mo.nr_e2(
+        np.ascontiguousarray(dm2Lbuf).reshape(ncas**2,nmo**2),
+        mo_coeff.T, (0, nao, 0, nao)).reshape(ncas**2,nao,nao)
+    dm2buf = lib.pack_tril(dm2buf)
+    dm2buf[:,diag_idx] *= .5
+    dm2buf = dm2buf.reshape(ncas,ncas,nao_pair)
+    dm2Lbuf = lib.pack_tril(dm2Lbuf)
+    dm2Lbuf[:,diag_idx] *= .5
+    dm2Lbuf = dm2Lbuf.reshape(ncas,ncas,nao_pair)
+
+    casdm2_ci_cc = casdm2_ci + casdm2_ci.transpose(0,1,3,2)
+    dm2buf_ci = ao2mo._ao2mo.nr_e2(
+        casdm2_ci_cc.reshape(ncas**2,ncas**2), mo_cas.T,
+        (0, nao, 0, nao)).reshape(ncas**2,nao,nao)
+    dm2buf_ci = lib.pack_tril(dm2buf_ci)
+    dm2buf_ci[:,diag_idx] *= .5
+    dm2Lbuf += dm2buf_ci.reshape(ncas,ncas,nao_pair)
+
+    vhf1c, vhf1a, vhf1cL, vhf1aL, vhf1a_ci = vhf1
+    aoslices = mol.aoslice_by_atom()
+    de_eri = np.zeros((len(atmlst),3))
+    max_memory = mc.max_memory - lib.current_memory()[0]
+    blksize = int(max_memory*.9e6/8 /
+                  (4*(aoslices[:,3]-aoslices[:,2]).max()*nao_pair))
+    blksize = min(nao, max(2, blksize))
+
+    for k, ia in enumerate(atmlst):
+        shl0, shl1, p0, p1 = aoslices[ia]
+        q1 = 0
+        for b0, b1, nf in _shell_prange(mol, 0, mol.nbas, blksize):
+            q0, q1 = q1, q1 + nf
+            dm2_ao = lib.einsum(
+                'ijw,pi,qj->pqw', dm2Lbuf,
+                mo_cas[p0:p1], mo_cas[q0:q1])
+            dm2_ao += lib.einsum(
+                'ijw,pi,qj->pqw', dm2buf,
+                moL_cas[p0:p1], mo_cas[q0:q1])
+            dm2_ao += lib.einsum(
+                'ijw,pi,qj->pqw', dm2buf,
+                mo_cas[p0:p1], moL_cas[q0:q1])
+            shls_slice = (shl0,shl1,b0,b1,0,mol.nbas,0,mol.nbas)
+            eri1 = mol.intor(
+                'int2e_ip1', comp=3, aosym='s2kl',
+                shls_slice=shls_slice).reshape(3,p1-p0,nf,nao_pair)
+            de_eri[k] -= np.einsum('xijw,ijw->x', eri1, dm2_ao) * 2
+
+        de_eri[k] += np.einsum(
+            'xij,ij->x', vhf1c[:,p0:p1], dm1L[p0:p1]) * 2
+        de_eri[k] += np.einsum(
+            'xij,ij->x', vhf1cL[:,p0:p1], dm1[p0:p1]) * 2
+        de_eri[k] += np.einsum(
+            'xij,ij->x', vhf1a[:,p0:p1], dmL_core[p0:p1]) * 2
+        de_eri[k] += np.einsum(
+            'xij,ij->x', vhf1aL[:,p0:p1], dm_core[p0:p1]) * 2
+        de_eri[k] += np.einsum(
+            'xij,ij->x', vhf1c[:,p0:p1], dm_cas_ci[p0:p1]) * 2
+        de_eri[k] += np.einsum(
+            'xij,ij->x', vhf1a_ci[:,p0:p1], dm_core[p0:p1]) * 2
+    return de_eri
+
 def mcpdft_HellmanFeynman_grad (mc, ot, veff1, veff2, mo_coeff=None, ci=None,
         atmlst=None, mf_grad=None, verbose=None, max_memory=None,
-        auxbasis_response=False):
+        auxbasis_response=False, lagrange_intermediates=None):
     '''Modification of pyscf.grad.casscf.kernel to compute instead the
     Hellman-Feynman gradient terms of MC-PDFT. From the differentiated
     Hamiltonian matrix elements, only the core and Coulomb energy parts
@@ -149,6 +303,9 @@ def mcpdft_HellmanFeynman_grad (mc, ot, veff1, veff2, mo_coeff=None, ci=None,
     if mf_grad is None: mf_grad = mc.get_rhf_base ().nuc_grad_method()
     if mc.frozen is not None:
         raise NotImplementedError
+    if auxbasis_response and lagrange_intermediates is not None:
+        raise NotImplementedError(
+            'Combined DF-MC-PDFT nuclear response is not implemented')
     if max_memory is None: max_memory = mc.max_memory
     t0 = (logger.process_clock (), logger.perf_counter ())
 
@@ -204,8 +361,16 @@ def mcpdft_HellmanFeynman_grad (mc, ot, veff1, veff2, mo_coeff=None, ci=None,
     dme0 = mo_coeff @ (0.5*(gfock+gfock.T)) @ mo_coeff.T
     del gfock
 
+    if lagrange_intermediates is not None:
+        common, orbital_response, ci_response = lagrange_intermediates
+        dme0 += _sa_lagrange_energy_weighted_density(
+            lagrange_intermediates)
+        dm1_lagrange = orbital_response['dm1L'] + ci_response['dm_cas']
+
     if atmlst is None:
-        atmlst = range(mol.natm)
+        atmlst = list(range(mol.natm))
+    else:
+        atmlst = list(atmlst)
 
     de_grid = np.zeros ((len(atmlst),3))
     de_wgt = np.zeros ((len(atmlst),3))
@@ -220,7 +385,18 @@ def mcpdft_HellmanFeynman_grad (mc, ot, veff1, veff2, mo_coeff=None, ci=None,
     dm1 = tag_array (dm1, mo_coeff=mo_coeff, mo_occ=mo_occup)
 
     # MRH: vhf1c and vhf1a should be the TRUE vj_c and vj_a (no vk!)
-    vj = mf_grad.get_jk (dm=dm1)[0]
+    if lagrange_intermediates is None:
+        vj = mf_grad.get_jk(dm=dm1)[0]
+    else:
+        lagrange_jk_dms = (
+            common['dm_core'], orbital_response['dm_cas'],
+            orbital_response['dmL_core'], orbital_response['dmL_cas'],
+            ci_response['dm_cas'])
+        derivative_dms = (dm1,) + lagrange_jk_dms
+        derivative_vj, derivative_vk = mf_grad.get_jk(
+            mol, derivative_dms)
+        vj = derivative_vj[0]
+        lagrange_vhf1 = derivative_vj[1:] - derivative_vk[1:] * .5
     if auxbasis_response:
         de_aux += ot_hyb*np.squeeze (vj.aux[:,:,atmlst,:])
 
@@ -360,11 +536,18 @@ def mcpdft_HellmanFeynman_grad (mc, ot, veff1, veff2, mo_coeff=None, ci=None,
     def coul_term(p0, p1):
         return np.tensordot(vj[:,p0:p1], dm1[p0:p1])*2
 
-    de_hcore, de_coul, de_xc, de_nuc, de_renorm = sum_terms(mf_grad, mol, atmlst, dm1, dme0, coul_term,
-                                                                        dvxc)
-    # Deal with hybridization
-    de_hcore *= ot_hyb
+    dm1_hcore = ot_hyb * dm1
+    if lagrange_intermediates is not None:
+        dm1_hcore += dm1_lagrange
+    de_hcore, de_coul, de_xc, de_nuc, de_renorm = sum_terms(
+        mf_grad, mol, atmlst, dm1_hcore, dme0, coul_term, dvxc)
     de_coul *= ot_hyb
+
+    if lagrange_intermediates is not None:
+        de_lagrange_eri = _sa_lagrange_eri_response(
+            lagrange_intermediates, lagrange_vhf1, atmlst)
+    else:
+        de_lagrange_eri = 0
 
     logger.debug (mc, "MC-PDFT Hellmann-Feynman nuclear:\n{}".format (de_nuc))
     logger.debug (mc, "MC-PDFT Hellmann-Feynman hcore component:\n{}".format (
@@ -380,7 +563,10 @@ def mcpdft_HellmanFeynman_grad (mc, ot, veff1, veff2, mo_coeff=None, ci=None,
     logger.debug (mc, "MC-PDFT Hellmann-Feynman renorm component:\n{}".format (
         de_renorm))
 
-    de = de_nuc + de_hcore + de_coul + de_renorm + de_xc + de_grid + de_wgt
+    logger.debug(mc, 'MC-PDFT Lagrange eri component:\n%s',
+                 de_lagrange_eri)
+    de = (de_nuc + de_hcore + de_coul + de_renorm + de_xc
+          + de_grid + de_wgt + de_lagrange_eri)
 
 
     if auxbasis_response:
@@ -395,6 +581,43 @@ def mcpdft_HellmanFeynman_grad (mc, ot, veff1, veff2, mo_coeff=None, ci=None,
     t1 = logger.timer (mc, 'PDFT HlFn total', *t0)
 
     return de
+
+
+def mcpdft_nuc_response(mc_grad, Lvec, state=None, atmlst=None,
+                        verbose=None, mo=None, ci=None, eris=None,
+                        mf_grad=None, veff1=None, veff2=None, **kwargs):
+    '''Combined MC-PDFT Hamiltonian, orbital, and CI nuclear response.'''
+    if state is None:
+        state = mc_grad.state
+    if atmlst is None:
+        atmlst = mc_grad.atmlst
+    if verbose is None:
+        verbose = mc_grad.verbose
+    if mo is None:
+        mo = mc_grad.base.mo_coeff
+    if ci is None:
+        ci = mc_grad.base.ci
+    if eris is None and mc_grad.eris is None:
+        eris = mc_grad.eris = mc_grad.base.ao2mo(mo)
+    elif eris is None:
+        eris = mc_grad.eris
+    if mf_grad is None:
+        mf_grad = mc_grad.base.get_rhf_base().nuc_grad_method()
+    if veff1 is None or veff2 is None:
+        raise ValueError('veff1 and veff2 are required')
+
+    Lorb, Lci = mc_grad.unpack_uniq_var(Lvec)
+    lagrange_intermediates = sacasscf.make_sa_lagrange_response_intermediates(
+        Lorb, Lci, mc_grad.base, mo_coeff=mo, ci=ci, eris=eris)
+
+    fcasscf = mc_grad.make_fcasscf(state)
+    fcasscf.mo_coeff = mo
+    fcasscf.ci = ci[state]
+    return mcpdft_HellmanFeynman_grad(
+        fcasscf, mc_grad.base.otfnal, veff1, veff2,
+        mo_coeff=mo, ci=ci[state], atmlst=atmlst, mf_grad=mf_grad,
+        verbose=verbose, lagrange_intermediates=lagrange_intermediates)
+
 
 # TODO: docstrings (parent classes???)
 # TODO: add a consistent threshold for elimination of degenerate-state rotations
@@ -431,8 +654,13 @@ class Gradients (sacasscf.Gradients):
             )
 
     def get_nuc_response(self, Lvec, **kwargs):
-        '''Use the generic separate response for MC-PDFT gradients.'''
-        return lagrange.Gradients.get_nuc_response(self, Lvec, **kwargs)
+        '''Return the combined MC-PDFT Hamiltonian and Lagrange response.'''
+        # MS-PDFT has an additional intermediate-state sector. DF-MC-PDFT
+        # requires its own auxiliary-basis contraction. Keep both on their
+        # existing component-wise paths until those implementations are added.
+        if hasattr(self, 'nis') or hasattr(self, 'auxbasis_response'):
+            return lagrange.Gradients.get_nuc_response(self, Lvec, **kwargs)
+        return mcpdft_nuc_response(self, Lvec, **kwargs)
 
     def get_wfn_response (self, state=None, verbose=None, mo=None,
             ci=None, veff1=None, veff2=None, nlag=None, **kwargs):
