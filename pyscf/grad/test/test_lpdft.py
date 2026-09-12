@@ -100,6 +100,24 @@ def tearDownModule():
 
 class KnownValues(unittest.TestCase):
 
+    def test_combined_response(self):
+        for density_fit in (False, True):
+            with self.subTest(density_fit=density_fit):
+                combined_grad = diatomic(
+                    "Li", "H", 1.4, "ftLDA,VWN3", "STO-3G", 2, 2, 2,
+                    density_fit=density_fit, grids_level=1)
+                de_combined = combined_grad.kernel(state=0)
+
+                separate_grad = combined_grad.base.nuc_grad_method()
+                separate_grad.conv_rtol = combined_grad.conv_rtol
+                de_separate = separate_grad.kernel(
+                    state=0, verbose=lib.logger.DEBUG1)
+
+                self.assertTrue(combined_grad.converged)
+                self.assertTrue(separate_grad.converged)
+                self.assertAlmostEqual(
+                    abs(de_combined - de_separate).max(), 0, 7)
+
     def test_grad_hhe_lin3ftlda22_631g_slow(self):
         """System has the following Lagrange multiplier sectors:
         orb:    yes
