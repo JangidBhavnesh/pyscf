@@ -130,6 +130,18 @@ class KnownValues(unittest.TestCase):
                     de = mc_grad.kernel (state=i)[0,0]
                     self.assertAlmostEqual (de, ref_sa[state], 5)
 
+    def test_combined_response (self):
+        mc = mcp[1][0]
+        combined_grad = mc.nuc_grad_method()
+        de_combined = combined_grad.kernel(state=0)
+        separate_grad = mc.nuc_grad_method()
+        de_separate = separate_grad.kernel(
+            state=0, verbose=lib.logger.DEBUG1)
+        self.assertTrue(combined_grad.converged)
+        self.assertTrue(separate_grad.converged)
+        self.assertAlmostEqual(
+            abs(de_combined - de_separate).max(), 0, 7)
+
     def test_triplet_mol (self):
         '''Check that energies & gradients do not depend on if the parent MF is RHF or ROHF'''
         mc = mcpdft.CASSCF (mf_nosym, 'ftLDA,VWN3', 5, (2,0),
@@ -178,5 +190,4 @@ class KnownValues(unittest.TestCase):
 if __name__ == "__main__":
     print("Full Tests for MC-PDFT gradients API")
     unittest.main()
-
 
