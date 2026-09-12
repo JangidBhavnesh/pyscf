@@ -65,21 +65,30 @@ def tearDownModule():
 class KnownValues(unittest.TestCase):
 
     def test_combined_response_mspdft(self):
+        # Legacy separate-response values with this exact grid fixture.
+        # PySCF upstream commit: 8006b713b5dcdb9aeef2365a0498b5a4ba0bb556
+        refs = {
+            False: (0.0567573180896199, 0.0210423464302606),
+            True: (0.0569030138751472, 0.0209606665604889),
+        }
         for density_fit in (False, True):
-            with self.subTest(density_fit=density_fit):
-                combined_grad = diatomic(
-                    'Li', 'H', 2.5, 'ftLDA,VWN3', 'STO-3G', 2, 2, 2,
-                    density_fit=density_fit, grids_level=1)
-                de_combined = combined_grad.kernel(state=0)
+            combined_grad = diatomic(
+                'Li', 'H', 2.5, 'ftLDA,VWN3', 'STO-3G', 2, 2, 2,
+                density_fit=density_fit, grids_level=1)
+            for state, ref in enumerate(refs[density_fit]):
+                with self.subTest(density_fit=density_fit, state=state):
+                    de_combined = combined_grad.kernel(state=state)
+                    separate_grad = combined_grad.base.nuc_grad_method()
+                    # DEBUG1 selects get_ham_response + get_LdotJnuc.
+                    de_separate = separate_grad.kernel(
+                        state=state, verbose=lib.logger.DEBUG1)
 
-                separate_grad = combined_grad.base.nuc_grad_method()
-                de_separate = separate_grad.kernel(
-                    state=0, verbose=lib.logger.DEBUG1)
-
-                self.assertTrue(combined_grad.converged)
-                self.assertTrue(separate_grad.converged)
-                self.assertAlmostEqual(
-                    abs(de_combined - de_separate).max(), 0, 7)
+                    self.assertTrue(combined_grad.converged)
+                    self.assertTrue(separate_grad.converged)
+                    self.assertAlmostEqual(de_combined[1,0], ref, 6)
+                    self.assertAlmostEqual(de_separate[1,0], ref, 6)
+                    self.assertAlmostEqual(
+                        abs(de_combined - de_separate).max(), 0, 7)
 
     def test_grad_h2_cms3ftlda22_sto3g_slow (self):
         # z_orb:    no
@@ -239,7 +248,5 @@ class KnownValues(unittest.TestCase):
 if __name__ == "__main__":
     print("Full Tests for CMS-PDFT gradients of diatomic molecules")
     unittest.main()
-
-
 
 

@@ -101,22 +101,31 @@ def tearDownModule():
 class KnownValues(unittest.TestCase):
 
     def test_combined_response(self):
+        # Legacy separate-response values with this exact grid fixture.
+        # PySCF upstream commit: 8006b713b5dcdb9aeef2365a0498b5a4ba0bb556
+        refs = {
+            False: (-0.0302423182042241, -0.0528453847643151),
+            True: (-0.0304870601338954, -0.0529029414543051),
+        }
         for density_fit in (False, True):
-            with self.subTest(density_fit=density_fit):
-                combined_grad = diatomic(
-                    "Li", "H", 1.4, "ftLDA,VWN3", "STO-3G", 2, 2, 2,
-                    density_fit=density_fit, grids_level=1)
-                de_combined = combined_grad.kernel(state=0)
+            combined_grad = diatomic(
+                "Li", "H", 1.4, "ftLDA,VWN3", "STO-3G", 2, 2, 2,
+                density_fit=density_fit, grids_level=1)
+            for state, ref in enumerate(refs[density_fit]):
+                with self.subTest(density_fit=density_fit, state=state):
+                    de_combined = combined_grad.kernel(state=state)
+                    separate_grad = combined_grad.base.nuc_grad_method()
+                    separate_grad.conv_rtol = combined_grad.conv_rtol
+                    # DEBUG1 selects get_ham_response + get_LdotJnuc.
+                    de_separate = separate_grad.kernel(
+                        state=state, verbose=lib.logger.DEBUG1)
 
-                separate_grad = combined_grad.base.nuc_grad_method()
-                separate_grad.conv_rtol = combined_grad.conv_rtol
-                de_separate = separate_grad.kernel(
-                    state=0, verbose=lib.logger.DEBUG1)
-
-                self.assertTrue(combined_grad.converged)
-                self.assertTrue(separate_grad.converged)
-                self.assertAlmostEqual(
-                    abs(de_combined - de_separate).max(), 0, 7)
+                    self.assertTrue(combined_grad.converged)
+                    self.assertTrue(separate_grad.converged)
+                    self.assertAlmostEqual(de_combined[1,0], ref, 6)
+                    self.assertAlmostEqual(de_separate[1,0], ref, 6)
+                    self.assertAlmostEqual(
+                        abs(de_combined - de_separate).max(), 0, 7)
 
     def test_grad_hhe_lin3ftlda22_631g_slow(self):
         """System has the following Lagrange multiplier sectors:

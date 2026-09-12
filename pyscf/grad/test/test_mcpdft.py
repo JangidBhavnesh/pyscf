@@ -132,15 +132,25 @@ class KnownValues(unittest.TestCase):
 
     def test_combined_response (self):
         mc = mcp[1][0]
-        combined_grad = mc.nuc_grad_method()
-        de_combined = combined_grad.kernel(state=0)
-        separate_grad = mc.nuc_grad_method()
-        de_separate = separate_grad.kernel(
-            state=0, verbose=lib.logger.DEBUG1)
-        self.assertTrue(combined_grad.converged)
-        self.assertTrue(separate_grad.converged)
-        self.assertAlmostEqual(
-            abs(de_combined - de_separate).max(), 0, 7)
+        # Legacy separate-response values.
+        # PySCF upstream commit: 8006b713b5dcdb9aeef2365a0498b5a4ba0bb556
+        refs = (5.66392595e-03, 3.67724051e-02)
+        states = np.argsort(mc.e_states)[:2]
+        for root, (state, ref) in enumerate(zip(states, refs)):
+            with self.subTest(state=root):
+                combined_grad = mc.nuc_grad_method()
+                de_combined = combined_grad.kernel(state=state)
+                separate_grad = mc.nuc_grad_method()
+                # DEBUG1 selects get_ham_response + get_LdotJnuc.
+                de_separate = separate_grad.kernel(
+                    state=state, verbose=lib.logger.DEBUG1)
+
+                self.assertTrue(combined_grad.converged)
+                self.assertTrue(separate_grad.converged)
+                self.assertAlmostEqual(de_combined[0,0], ref, 6)
+                self.assertAlmostEqual(de_separate[0,0], ref, 6)
+                self.assertAlmostEqual(
+                    abs(de_combined - de_separate).max(), 0, 7)
 
     def test_combined_response_df(self):
         mf_df = mf_nosym.density_fit().run()
@@ -148,16 +158,24 @@ class KnownValues(unittest.TestCase):
             mf_df, 'ftLDA,VWN3', 2, 2, grids_level=1)
         mc.state_average_([.5, .5]).run()
 
-        combined_grad = mc.nuc_grad_method()
-        de_combined = combined_grad.kernel(state=0)
-        separate_grad = mc.nuc_grad_method()
-        de_separate = separate_grad.kernel(
-            state=0, verbose=lib.logger.DEBUG1)
+        # Legacy separate-response values with the same test fixture.
+        # PySCF upstream commit: 8006b713b5dcdb9aeef2365a0498b5a4ba0bb556
+        refs = (0.0039019377005890, 0.0375153074965278)
+        for state, ref in enumerate(refs):
+            with self.subTest(state=state):
+                combined_grad = mc.nuc_grad_method()
+                de_combined = combined_grad.kernel(state=state)
+                separate_grad = mc.nuc_grad_method()
+                # DEBUG1 selects get_ham_response + get_LdotJnuc.
+                de_separate = separate_grad.kernel(
+                    state=state, verbose=lib.logger.DEBUG1)
 
-        self.assertTrue(combined_grad.converged)
-        self.assertTrue(separate_grad.converged)
-        self.assertAlmostEqual(
-            abs(de_combined - de_separate).max(), 0, 7)
+                self.assertTrue(combined_grad.converged)
+                self.assertTrue(separate_grad.converged)
+                self.assertAlmostEqual(de_combined[0,0], ref, 6)
+                self.assertAlmostEqual(de_separate[0,0], ref, 6)
+                self.assertAlmostEqual(
+                    abs(de_combined - de_separate).max(), 0, 7)
 
     def test_triplet_mol (self):
         '''Check that energies & gradients do not depend on if the parent MF is RHF or ROHF'''
