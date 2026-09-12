@@ -306,8 +306,9 @@ def mcpdft_HellmanFeynman_grad (mc, ot, veff1, veff2, mo_coeff=None, ci=None,
         raise NotImplementedError
     if (auxbasis_response and lagrange_intermediates is not None
             and combined_df_response is None):
-        raise NotImplementedError(
-            'Combined DF-MC-PDFT nuclear response is not implemented')
+        raise ValueError(
+            'combined_df_response is required for a combined DF-MC-PDFT '
+            'nuclear response')
     if max_memory is None: max_memory = mc.max_memory
     t0 = (logger.process_clock (), logger.perf_counter ())
 
