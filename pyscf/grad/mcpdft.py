@@ -291,7 +291,8 @@ def _sa_lagrange_eri_response(lagrange_intermediates, vhf1, atmlst):
 
 def mcpdft_HellmanFeynman_grad (mc, ot, veff1, veff2, mo_coeff=None, ci=None,
         atmlst=None, mf_grad=None, verbose=None, max_memory=None,
-        auxbasis_response=False, lagrange_intermediates=None):
+        auxbasis_response=False, lagrange_intermediates=None,
+        combined_df_response=None):
     '''Modification of pyscf.grad.casscf.kernel to compute instead the
     Hellman-Feynman gradient terms of MC-PDFT. From the differentiated
     Hamiltonian matrix elements, only the core and Coulomb energy parts
@@ -303,7 +304,8 @@ def mcpdft_HellmanFeynman_grad (mc, ot, veff1, veff2, mo_coeff=None, ci=None,
     if mf_grad is None: mf_grad = mc.get_rhf_base ().nuc_grad_method()
     if mc.frozen is not None:
         raise NotImplementedError
-    if auxbasis_response and lagrange_intermediates is not None:
+    if (auxbasis_response and lagrange_intermediates is not None
+            and combined_df_response is None):
         raise NotImplementedError(
             'Combined DF-MC-PDFT nuclear response is not implemented')
     if max_memory is None: max_memory = mc.max_memory
@@ -385,7 +387,9 @@ def mcpdft_HellmanFeynman_grad (mc, ot, veff1, veff2, mo_coeff=None, ci=None,
     dm1 = tag_array (dm1, mo_coeff=mo_coeff, mo_occ=mo_occup)
 
     # MRH: vhf1c and vhf1a should be the TRUE vj_c and vj_a (no vk!)
-    if lagrange_intermediates is None:
+    if combined_df_response is not None:
+        vj = None
+    elif lagrange_intermediates is None:
         vj = mf_grad.get_jk(dm=dm1)[0]
     else:
         lagrange_jk_dms = (
@@ -397,7 +401,7 @@ def mcpdft_HellmanFeynman_grad (mc, ot, veff1, veff2, mo_coeff=None, ci=None,
             mol, derivative_dms)
         vj = derivative_vj[0]
         lagrange_vhf1 = derivative_vj[1:] - derivative_vk[1:] * .5
-    if auxbasis_response:
+    if auxbasis_response and combined_df_response is None:
         de_aux += ot_hyb*np.squeeze (vj.aux[:,:,atmlst,:])
 
     # MRH: Now I have to compute the gradient of the on-top energy
@@ -533,8 +537,12 @@ def mcpdft_HellmanFeynman_grad (mc, ot, veff1, veff2, mo_coeff=None, ci=None,
             rho = Pi = eot = vot = aoval = moval_occ = None
             gc.collect ()
 
-    def coul_term(p0, p1):
-        return np.tensordot(vj[:,p0:p1], dm1[p0:p1])*2
+    if combined_df_response is None:
+        def coul_term(p0, p1):
+            return np.tensordot(vj[:,p0:p1], dm1[p0:p1])*2
+    else:
+        def coul_term(p0, p1):
+            return np.zeros(3)
 
     dm1_hcore = ot_hyb * dm1
     if lagrange_intermediates is not None:
@@ -543,7 +551,8 @@ def mcpdft_HellmanFeynman_grad (mc, ot, veff1, veff2, mo_coeff=None, ci=None,
         mf_grad, mol, atmlst, dm1_hcore, dme0, coul_term, dvxc)
     de_coul *= ot_hyb
 
-    if lagrange_intermediates is not None:
+    if (lagrange_intermediates is not None
+            and combined_df_response is None):
         de_lagrange_eri = _sa_lagrange_eri_response(
             lagrange_intermediates, lagrange_vhf1, atmlst)
     else:
@@ -568,8 +577,12 @@ def mcpdft_HellmanFeynman_grad (mc, ot, veff1, veff2, mo_coeff=None, ci=None,
     de = (de_nuc + de_hcore + de_coul + de_renorm + de_xc
           + de_grid + de_wgt + de_lagrange_eri)
 
+    if combined_df_response is not None:
+        de += combined_df_response
+        logger.debug(mc, 'MC-PDFT combined DF component:\n%s',
+                     combined_df_response)
 
-    if auxbasis_response:
+    if auxbasis_response and combined_df_response is None:
         de += de_aux
         logger.debug (mc, "MC-PDFT Hellmann-Feynman aux component:\n{}".format
             (de_aux))
