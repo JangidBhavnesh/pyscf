@@ -294,18 +294,9 @@ def mspdft_nuc_response(mc_grad, Lvec, mc_nuc_response=None,
     de_is = mc_grad.diab_grad(
         Lvec_is, atmlst=atmlst, mf_grad=mf_grad, eris=eris, mo=mo,
         ci=ci, **kwargs)
-    extra_response = getattr(mc_grad, 'get_extra_nuc_response', None)
-    if extra_response is None:
-        de_extra = 0
-    else:
-        de_extra = extra_response(
-            state=state, si=si, si_bra=si_bra, si_ket=si_ket, mo=mo,
-            ci=ci, eris=eris, mf_grad=mf_grad, atmlst=atmlst,
-            verbose=verbose, **kwargs)
     log.debug('MS-PDFT off-diagonal H-F response:\n%s', de_heff)
     log.debug('MS-PDFT Lagrange IS response:\n%s', de_is)
-    log.debug('MS-PDFT extra nuclear response:\n%s', de_extra)
-    return de + de_heff + de_is + de_extra
+    return de + de_heff + de_is
 
 # TODO: docstring? especially considering the "si_bra," "si_ket"
 # functionality??
@@ -343,6 +334,11 @@ class Gradients (mcpdft_grad.Gradients):
 
     def get_nuc_response(self, Lvec, **kwargs):
         '''Return the combined MS-PDFT Hamiltonian and Lagrange response.'''
+        # Subclasses such as MS-PDFT NACs add method-specific Hamiltonian
+        # response terms.  Keep their polymorphic split path unchanged.
+        if type(self).get_ham_response is not Gradients.get_ham_response:
+            return mcpdft_grad.Gradients.get_nuc_response(
+                self, Lvec, **kwargs)
         return mspdft_nuc_response(self, Lvec, **kwargs)
 
     def kernel (self, state=None, mo=None, ci=None, si=None, _freeze_is=False,
