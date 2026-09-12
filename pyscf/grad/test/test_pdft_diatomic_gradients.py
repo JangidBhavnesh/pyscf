@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from pyscf import gto, scf, df, dft
+from pyscf import gto, scf, df, dft, lib
 from pyscf.data.nist import BOHR
 from pyscf import mcpdft
 from pyscf.fci.addons import _unpack_nelec
@@ -63,6 +63,23 @@ def tearDownModule():
 # freedom. But if the lih_cms2ftpbe and _df cases pass, then almost certainly, they all pass.
 
 class KnownValues(unittest.TestCase):
+
+    def test_combined_response_mspdft(self):
+        for density_fit in (False, True):
+            with self.subTest(density_fit=density_fit):
+                combined_grad = diatomic(
+                    'Li', 'H', 2.5, 'ftLDA,VWN3', 'STO-3G', 2, 2, 2,
+                    density_fit=density_fit, grids_level=1)
+                de_combined = combined_grad.kernel(state=0)
+
+                separate_grad = combined_grad.base.nuc_grad_method()
+                de_separate = separate_grad.kernel(
+                    state=0, verbose=lib.logger.DEBUG1)
+
+                self.assertTrue(combined_grad.converged)
+                self.assertTrue(separate_grad.converged)
+                self.assertAlmostEqual(
+                    abs(de_combined - de_separate).max(), 0, 7)
 
     def test_grad_h2_cms3ftlda22_sto3g_slow (self):
         # z_orb:    no
@@ -222,8 +239,6 @@ class KnownValues(unittest.TestCase):
 if __name__ == "__main__":
     print("Full Tests for CMS-PDFT gradients of diatomic molecules")
     unittest.main()
-
-
 
 
 
