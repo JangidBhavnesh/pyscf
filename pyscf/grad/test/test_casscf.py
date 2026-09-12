@@ -99,16 +99,25 @@ def tearDownModule():
     del mol, mf
 
 class KnownValues(unittest.TestCase):
-    def assert_sacasscf_response_paths(self, mc, grad_module):
-        standard_solver = grad_module.Gradients(mc, state=0)
-        standard_gradient = standard_solver.kernel()
-        component_solver = grad_module.Gradients(mc, state=0)
-        component_gradient = component_solver.kernel(verbose=lib.logger.DEBUG1)
+    def assert_sacasscf_response_paths(self, mc, grad_module, refs=None):
+        if refs is None:
+            refs = (None,) * len(mc.weights)
+        for state, ref in enumerate(refs):
+            with self.subTest(state=state):
+                combined_solver = grad_module.Gradients(mc, state=state)
+                combined_gradient = combined_solver.kernel()
+                separate_solver = grad_module.Gradients(mc, state=state)
+                # DEBUG1 selects get_ham_response + get_LdotJnuc.
+                separate_gradient = separate_solver.kernel(
+                    verbose=lib.logger.DEBUG1)
 
-        self.assertTrue(standard_solver.converged)
-        self.assertTrue(component_solver.converged)
-        self.assertAlmostEqual(
-            abs(standard_gradient - component_gradient).max(), 0, 7)
+                self.assertTrue(combined_solver.converged)
+                self.assertTrue(separate_solver.converged)
+                if ref is not None:
+                    self.assertAlmostEqual(combined_gradient[1, 2], ref, 6)
+                    self.assertAlmostEqual(separate_gradient[1, 2], ref, 6)
+                self.assertAlmostEqual(
+                    abs(combined_gradient - separate_gradient).max(), 0, 7)
 
     def test_casscf_grad(self):
         mc = mcscf.CASSCF(mf, 4, 4).run()
@@ -291,15 +300,21 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(de_1[1,2], (e1_1-e2_1)/0.002*lib.param.BOHR, 4)
 
     def test_state_average_response_paths(self):
-        for label, mean_field, grad_module in (
-                ('conventional', mf, sacasscf_grad),
-                ('density-fitted', mf_df, dfsacasscf_grad)):
+        # Legacy separate-response values computed from PySCF upstream commit:
+        # 8006b713b5dcdb9aeef2365a0498b5a4ba0bb556
+        cases = (
+            ('conventional', mf, sacasscf_grad,
+             (-0.0957182844094371, -0.1996910260436689)),
+            ('density-fitted', mf_df, dfsacasscf_grad,
+             (-0.0957726788401086, -0.1997595834384447)),
+        )
+        for label, mean_field, grad_module, refs in cases:
             with self.subTest(label=label):
                 mc = mcscf.CASSCF(mean_field, 4, 4)
                 mc.conv_tol = 1e-10
                 mc.fcisolver.conv_tol = 1e-10
                 mc.state_average_([.5, .5]).run()
-                self.assert_sacasscf_response_paths(mc, grad_module)
+                self.assert_sacasscf_response_paths(mc, grad_module, refs)
 
     def test_state_average_mix_response_paths(self):
         for label, mean_field, grad_module in (
