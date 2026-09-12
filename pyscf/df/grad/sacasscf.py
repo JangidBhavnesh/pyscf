@@ -536,7 +536,8 @@ def _grad_elec_df_response_direct(mc, mf_grad, dms, pair_weights,
 def Lorb_Lci_dot_dgorb_dgci_dx(Lorb, Lci, weights, mc, mo_coeff=None,
                                ci=None, atmlst=None, mf_grad=None, eris=None,
                                verbose=None, fcasscf=None, ci_state=None,
-                               auxbasis_response=True):
+                               auxbasis_response=True,
+                               lagrange_intermediates=None):
     '''Combined DF Hamiltonian, orbital, and CI SA-CASSCF response.
 
     Selected J/K density pairs and the effective active-space DF densities
@@ -550,36 +551,30 @@ def Lorb_Lci_dot_dgorb_dgci_dx(Lorb, Lci, weights, mc, mo_coeff=None,
         raise NotImplementedError
 
     t0 = (lib.logger.process_clock(), lib.logger.perf_counter())
-    mol = mc.mol
+    if lagrange_intermediates is None:
+        lagrange_intermediates = sacasscf_grad.make_sa_lagrange_response_intermediates(
+            Lorb, Lci, mc, mo_coeff=mo_coeff, ci=ci, eris=eris)
+    common, orbital_response, ci_response = lagrange_intermediates
+    mol = common['mol']
     if atmlst is None:
         atmlst = list(range(mol.natm))
     else:
         atmlst = list(atmlst)
-    ncore, ncas = mc.ncore, mc.ncas
-    nocc = ncore + ncas
-    nelecas = mc.nelecas
-    nao, nmo = mo_coeff.shape
-    mo_core = mo_coeff[:,:ncore]
-    mo_cas = mo_coeff[:,ncore:nocc]
-    moL_coeff = np.dot(mo_coeff, Lorb)
-    moL_core = moL_coeff[:,:ncore]
-    moL_cas = moL_coeff[:,ncore:nocc]
-    s0_inv = np.dot(mo_coeff, mo_coeff.T)
-
-    casdm1, casdm2 = mc.fcisolver.make_rdm12(ci, ncas, nelecas)
-    dm_core = np.dot(mo_core, mo_core.T) * 2
-    dm_cas = reduce(np.dot, (mo_cas, casdm1, mo_cas.T))
-    dmL_core = np.dot(moL_core, mo_core.T) * 2
-    dmL_cas = reduce(np.dot, (moL_cas, casdm1, mo_cas.T))
-    dmL_core += dmL_core.T
-    dmL_cas += dmL_cas.T
-    dm1L = dmL_core + dmL_cas
-
-    casdm1_ci, casdm2_ci = mc.fcisolver.trans_rdm12(
-        Lci, ci, ncas, nelecas)
-    casdm1_ci += casdm1_ci.transpose(1,0)
-    casdm2_ci += casdm2_ci.transpose(1,0,3,2)
-    dm_cas_ci = reduce(np.dot, (mo_cas, casdm1_ci, mo_cas.T))
+    mo_coeff, ci, eris = common['mo_coeff'], common['ci'], common['eris']
+    ncore, ncas, nocc = common['ncore'], common['ncas'], common['nocc']
+    nao, nmo = common['nao'], common['nmo']
+    mo_core, mo_cas = common['mo_core'], common['mo_cas']
+    dm_core, s0_inv, aapa = common['dm_core'], common['s0_inv'], common['aapa']
+    moL_core = orbital_response['moL_core']
+    moL_cas = orbital_response['moL_cas']
+    casdm1, casdm2 = orbital_response['casdm1'], orbital_response['casdm2']
+    dm_cas = orbital_response['dm_cas']
+    dmL_core = orbital_response['dmL_core']
+    dmL_cas = orbital_response['dmL_cas']
+    dm1, dm1L = orbital_response['dm1'], orbital_response['dm1L']
+    aapaL = orbital_response['aapaL']
+    casdm1_ci, casdm2_ci = ci_response['casdm1'], ci_response['casdm2']
+    dm_cas_ci = ci_response['dm_cas']
 
     with_ham_response = fcasscf is not None or ci_state is not None
     if with_ham_response:
@@ -589,17 +584,6 @@ def Lorb_Lci_dot_dgorb_dgci_dx(Lorb, Lci, weights, mc, mo_coeff=None,
             ci_state, ncas, fcasscf.nelecas)
         dm_cas_ham = reduce(np.dot, (mo_cas, casdm1_ham, mo_cas.T))
         dm1_ham = dm_core + dm_cas_ham
-
-    aapa = np.asarray(eris.papa[ncore:nocc])
-    aapaL = np.zeros((ncas,ncas,nmo,ncas), dtype=dm_cas.dtype)
-    for i in range(nmo):
-        jbuf = eris.ppaa[i]
-        kbuf = eris.papa[i]
-        aapaL[:,:,i,:] += np.tensordot(
-            jbuf, Lorb[:,ncore:nocc], axes=((0),(0)))
-        kbuf = np.tensordot(
-            kbuf, Lorb[:,ncore:nocc], axes=((1),(0))).transpose(1,2,0)
-        aapaL[:,:,i,:] += kbuf + kbuf.transpose(1,0,2)
 
     jk_dms = (dm_core, dm_cas, dmL_core, dmL_cas, dm_cas_ci)
     if with_ham_response:
@@ -798,12 +782,15 @@ class Gradients (sacasscf_grad.Gradients):
         fcasscf = self.make_fcasscf(state)
         fcasscf.mo_coeff = mo
         fcasscf.ci = ci[state]
+        lagrange_intermediates = sacasscf_grad.make_sa_lagrange_response_intermediates(
+            Lorb, Lci, self.base, mo_coeff=mo, ci=ci, eris=eris)
 
         de = Lorb_Lci_dot_dgorb_dgci_dx(
             Lorb, Lci, self.weights, self.base, mo_coeff=mo, ci=ci,
             atmlst=atmlst, mf_grad=mf_grad, eris=eris, verbose=verbose,
             fcasscf=fcasscf, ci_state=ci[state],
-            auxbasis_response=self.auxbasis_response)
+            auxbasis_response=self.auxbasis_response,
+            lagrange_intermediates=lagrange_intermediates)
         de += self.grad_nuc(atmlst=atmlst)
         if self.mol.symmetry:
             de = self.symmetrize(de, atmlst)

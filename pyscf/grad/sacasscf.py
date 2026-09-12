@@ -331,28 +331,47 @@ def Lci_dot_dgci_dx (Lci, weights, mc, mo_coeff=None, ci=None, atmlst=None, mf_g
     de = de_hcore + de_renorm + de_eri
     return de
 
-def Lorb_Lci_dot_dgorb_dgci_dx (Lorb, Lci, weights, mc, mo_coeff=None, ci=None,
-                                atmlst=None, mf_grad=None, eris=None, verbose=None,
-                                fcasscf=None, ci_state=None):
-    '''Combined orbital and CI Lagrange contributions to the SA-CASSCF gradient.
+def make_sa_lagrange_response_intermediates(Lorb, Lci, mc, mo_coeff=None,
+                                            ci=None, eris=None):
+    '''Build the orbital and CI parts of an SA-CASSCF nuclear response.
 
-    This is equivalent to::
+    The returned intermediates contain only derivatives of the SA-CASSCF
+    stationarity conditions.  In particular, they do not contain a
+    target-state Hamiltonian response.  This separation lets nonvariational
+    methods reuse the SA-CASSCF Lagrange terms while assembling their own
+    method-specific Hamiltonian terms.
 
-        Lorb_dot_dgorb_dx(Lorb, mc, ...) +
-        Lci_dot_dgci_dx(Lci, weights, mc, ...)
+    Args:
+        Lorb : ndarray
+            Orbital sector of the Lagrange multiplier vector.
+        Lci : ndarray or list of ndarray
+            CI sector of the Lagrange multiplier vector.
+        mc : StateAverageMCSCFSolver
+            SA-CASSCF object defining the stationarity conditions.
 
-    The effective one- and two-particle densities are combined so that the
-    one-electron derivatives and each ``int2e_ip1`` shell block are evaluated
-    only once.  If ``fcasscf`` and ``ci_state`` are supplied, the target-state
-    Hamiltonian response is included in the same pass.
+    Kwargs:
+        mo_coeff : ndarray
+            Molecular orbitals. Defaults to ``mc.mo_coeff``.
+        ci : ndarray or list of ndarray
+            State-averaged CI vectors. Defaults to ``mc.ci``.
+        eris : object
+            CASSCF integral intermediates. Generated from ``mo_coeff`` when
+            omitted.
+
+    Returns:
+        common, orbital_response, ci_response : tuple of dict
+            Intermediates grouped into common MO/integral data, orbital
+            Lagrange-response data, and CI Lagrange-response data.
     '''
-    if mo_coeff is None: mo_coeff = mc.mo_coeff
-    if ci is None: ci = mc.ci
-    if mf_grad is None: mf_grad = mc._scf.nuc_grad_method()
+    if mo_coeff is None:
+        mo_coeff = mc.mo_coeff
+    if ci is None:
+        ci = mc.ci
+    if eris is None:
+        eris = mc.ao2mo(mo_coeff)
     if mc.frozen is not None:
         raise NotImplementedError
 
-    t0 = (logger.process_clock(), logger.perf_counter())
     mol = mc.mol
     ncore = mc.ncore
     ncas = mc.ncas
@@ -380,10 +399,87 @@ def Lorb_Lci_dot_dgorb_dgci_dx (Lorb, Lci, weights, mc, mo_coeff=None, ci=None,
     dm1L = dmL_core + dmL_cas
 
     # CI response densities are transition densities plus their transposes.
-    casdm1_ci, casdm2_ci = mc.fcisolver.trans_rdm12(Lci, ci, ncas, nelecas)
+    casdm1_ci, casdm2_ci = mc.fcisolver.trans_rdm12(
+        Lci, ci, ncas, nelecas)
     casdm1_ci += casdm1_ci.transpose(1,0)
     casdm2_ci += casdm2_ci.transpose(1,0,3,2)
     dm_cas_ci = reduce(np.dot, (mo_cas, casdm1_ci, mo_cas.T))
+
+    # These active-space integrals are shared by the orbital and CI sectors.
+    aapa = np.asarray(eris.papa[ncore:nocc])
+    aapaL = np.zeros((ncas,ncas,nmo,ncas), dtype=dm_cas.dtype)
+    for i in range(nmo):
+        jbuf = eris.ppaa[i]
+        kbuf = eris.papa[i]
+        aapaL[:,:,i,:] += np.tensordot(
+            jbuf, Lorb[:,ncore:nocc], axes=((0),(0)))
+        kbuf = np.tensordot(
+            kbuf, Lorb[:,ncore:nocc], axes=((1),(0))).transpose(1,2,0)
+        aapaL[:,:,i,:] += kbuf + kbuf.transpose(1,0,2)
+
+    common = {
+        'mc': mc, 'mol': mol, 'mo_coeff': mo_coeff, 'ci': ci,
+        'eris': eris, 'ncore': ncore, 'ncas': ncas, 'nocc': nocc,
+        'nelecas': nelecas, 'nao': nao, 'nmo': nmo,
+        'nao_pair': nao_pair, 'mo_core': mo_core, 'mo_cas': mo_cas,
+        'dm_core': dm_core, 's0_inv': s0_inv, 'aapa': aapa,
+    }
+    orbital_response = {
+        'Lorb': Lorb, 'moL_core': moL_core, 'moL_cas': moL_cas,
+        'casdm1': casdm1, 'casdm2': casdm2, 'dm_cas': dm_cas,
+        'dmL_core': dmL_core, 'dmL_cas': dmL_cas, 'dm1': dm1,
+        'dm1L': dm1L, 'aapaL': aapaL,
+    }
+    ci_response = {
+        'Lci': Lci, 'casdm1': casdm1_ci, 'casdm2': casdm2_ci,
+        'dm_cas': dm_cas_ci,
+    }
+    return common, orbital_response, ci_response
+
+
+def Lorb_Lci_dot_dgorb_dgci_dx (Lorb, Lci, weights, mc, mo_coeff=None, ci=None,
+                                atmlst=None, mf_grad=None, eris=None, verbose=None,
+                                fcasscf=None, ci_state=None,
+                                lagrange_intermediates=None):
+    '''Combined orbital and CI Lagrange contributions to the SA-CASSCF gradient.
+
+    This is equivalent to::
+
+        Lorb_dot_dgorb_dx(Lorb, mc, ...) +
+        Lci_dot_dgci_dx(Lci, weights, mc, ...)
+
+    The effective one- and two-particle densities are combined so that the
+    one-electron derivatives and each ``int2e_ip1`` shell block are evaluated
+    only once.  If ``fcasscf`` and ``ci_state`` are supplied, the target-state
+    Hamiltonian response is included in the same pass.
+    '''
+    if mo_coeff is None: mo_coeff = mc.mo_coeff
+    if ci is None: ci = mc.ci
+    if mf_grad is None: mf_grad = mc._scf.nuc_grad_method()
+    if mc.frozen is not None:
+        raise NotImplementedError
+
+    t0 = (logger.process_clock(), logger.perf_counter())
+    if lagrange_intermediates is None:
+        lagrange_intermediates = make_sa_lagrange_response_intermediates(
+            Lorb, Lci, mc, mo_coeff=mo_coeff, ci=ci, eris=eris)
+    common, orbital_response, ci_response = lagrange_intermediates
+    mol = common['mol']
+    mo_coeff, ci, eris = common['mo_coeff'], common['ci'], common['eris']
+    ncore, ncas, nocc = common['ncore'], common['ncas'], common['nocc']
+    nao, nmo, nao_pair = common['nao'], common['nmo'], common['nao_pair']
+    mo_core, mo_cas = common['mo_core'], common['mo_cas']
+    dm_core, s0_inv, aapa = common['dm_core'], common['s0_inv'], common['aapa']
+    moL_core = orbital_response['moL_core']
+    moL_cas = orbital_response['moL_cas']
+    casdm1, casdm2 = orbital_response['casdm1'], orbital_response['casdm2']
+    dm_cas = orbital_response['dm_cas']
+    dmL_core = orbital_response['dmL_core']
+    dmL_cas = orbital_response['dmL_cas']
+    dm1, dm1L = orbital_response['dm1'], orbital_response['dm1L']
+    aapaL = orbital_response['aapaL']
+    casdm1_ci, casdm2_ci = ci_response['casdm1'], ci_response['casdm2']
+    dm_cas_ci = ci_response['dm_cas']
 
     with_ham_response = fcasscf is not None or ci_state is not None
     if with_ham_response:
@@ -393,16 +489,6 @@ def Lorb_Lci_dot_dgorb_dgci_dx (Lorb, Lci, weights, mc, mo_coeff=None, ci=None,
             ci_state, ncas, fcasscf.nelecas)
         dm_cas_ham = reduce(np.dot, (mo_cas, casdm1_ham, mo_cas.T))
         dm1_ham = dm_core + dm_cas_ham
-
-    # The (active active|orbital active) integrals are common to all parts.
-    aapa = np.asarray(eris.papa[ncore:nocc])
-    aapaL = np.zeros((ncas,ncas,nmo,ncas), dtype=dm_cas.dtype)
-    for i in range(nmo):
-        jbuf = eris.ppaa[i]
-        kbuf = eris.papa[i]
-        aapaL[:,:,i,:] += np.tensordot(jbuf, Lorb[:,ncore:nocc], axes=((0),(0)))
-        kbuf = np.tensordot(kbuf, Lorb[:,ncore:nocc], axes=((1),(0))).transpose(1,2,0)
-        aapaL[:,:,i,:] += kbuf + kbuf.transpose(1,0,2)
 
     # Generalized Fock contribution for the orbital response.
     jk_dms = (dm_core, dm_cas, dmL_core, dmL_cas, dm_cas_ci)
@@ -950,11 +1036,14 @@ class Gradients (lagrange.Gradients):
         fcasscf = self.make_fcasscf(state)
         fcasscf.mo_coeff = mo
         fcasscf.ci = ci[state]
+        lagrange_intermediates = make_sa_lagrange_response_intermediates(
+            Lorb, Lci, self.base, mo_coeff=mo, ci=ci, eris=eris)
 
         de = Lorb_Lci_dot_dgorb_dgci_dx(
             Lorb, Lci, self.weights, self.base, mo_coeff=mo, ci=ci,
             atmlst=atmlst, mf_grad=mf_grad, eris=eris, verbose=verbose,
-            fcasscf=fcasscf, ci_state=ci[state])
+            fcasscf=fcasscf, ci_state=ci[state],
+            lagrange_intermediates=lagrange_intermediates)
         de += self.grad_nuc(atmlst=atmlst)
         if self.mol.symmetry:
             de = self.symmetrize(de, atmlst)
